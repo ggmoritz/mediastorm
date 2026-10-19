@@ -73,10 +73,10 @@ func ReleaseAvailability(mediaType, status, releaseDate string, theatrical, home
 		effective := status
 		switch {
 		case theatrical != nil || home != nil || len(releases) > 0:
-			effective = MovieReleaseStatus(Title{MediaType: "movie", Theatrical: theatrical, HomeRelease: home, Releases: releases, ReleaseDate: releaseDate, Year: year})
+			effective = MovieReleaseStatusAt(Title{MediaType: "movie", Theatrical: theatrical, HomeRelease: home, Releases: releases, ReleaseDate: releaseDate, Year: year}, now)
 		case hasDate && status != MovieReleaseStatusReleased:
 			// The date is authoritative over a coarse (possibly stale cached) status.
-			effective = MovieReleaseStatusFromReleaseDate(releaseDate)
+			effective = MovieReleaseStatusFromReleaseDateAt(releaseDate, now)
 		}
 		switch effective {
 		case MovieReleaseStatusReleased:

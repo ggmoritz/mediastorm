@@ -241,6 +241,11 @@ const (
 // Home releases mean available. Older theatrical releases are also treated as
 // available even when TMDB has no digital/physical date.
 func MovieReleaseStatus(title Title) string {
+	return MovieReleaseStatusAt(title, time.Now())
+}
+
+// MovieReleaseStatusAt is MovieReleaseStatus evaluated at now.
+func MovieReleaseStatusAt(title Title, now time.Time) string {
 	if !strings.EqualFold(strings.TrimSpace(title.MediaType), "movie") {
 		return strings.TrimSpace(title.Status)
 	}
@@ -251,33 +256,39 @@ func MovieReleaseStatus(title Title) string {
 	for i := range title.Releases {
 		switch strings.ToLower(strings.TrimSpace(title.Releases[i].Type)) {
 		case "digital", "physical", "tv":
-			if releaseIsReleased(&title.Releases[i]) {
+			if releaseIsReleasedAt(&title.Releases[i], now) {
 				return MovieReleaseStatusReleased
 			}
 		}
 	}
-	status := MovieReleaseStatusFromWindows(title.Theatrical, title.HomeRelease)
+	status := MovieReleaseStatusFromWindowsAt(title.Theatrical, title.HomeRelease, now)
 	if status != MovieReleaseStatusUnknown {
 		return status
 	}
-	if dated := MovieReleaseStatusFromReleaseDate(title.ReleaseDate); dated != MovieReleaseStatusUnknown {
+	if dated := MovieReleaseStatusFromReleaseDateAt(title.ReleaseDate, now); dated != MovieReleaseStatusUnknown {
 		return dated
 	}
-	if title.Year > 0 && title.Year < time.Now().Year() {
+	if title.Year > 0 && title.Year < now.Year() {
 		return MovieReleaseStatusReleased
 	}
-	if title.Year >= time.Now().Year() {
+	if title.Year >= now.Year() {
 		return MovieReleaseStatusUpcoming
 	}
 	return status
 }
 
 func MovieReleaseStatusFromWindows(theatrical, home *Release) string {
-	if releaseIsReleased(home) {
+	return MovieReleaseStatusFromWindowsAt(theatrical, home, time.Now())
+}
+
+// MovieReleaseStatusFromWindowsAt is MovieReleaseStatusFromWindows evaluated
+// at now.
+func MovieReleaseStatusFromWindowsAt(theatrical, home *Release, now time.Time) string {
+	if releaseIsReleasedAt(home, now) {
 		return MovieReleaseStatusReleased
 	}
-	if releaseIsReleased(theatrical) {
-		if releaseIsOlderThan(theatrical, 12, time.Now()) {
+	if releaseIsReleasedAt(theatrical, now) {
+		if releaseIsOlderThan(theatrical, 12, now) {
 			return MovieReleaseStatusReleased
 		}
 		return MovieReleaseStatusTheatrical
@@ -289,12 +300,18 @@ func MovieReleaseStatusFromWindows(theatrical, home *Release) string {
 }
 
 func MovieReleaseStatusFromReleaseDate(releaseDate string) string {
+	return MovieReleaseStatusFromReleaseDateAt(releaseDate, time.Now())
+}
+
+// MovieReleaseStatusFromReleaseDateAt is MovieReleaseStatusFromReleaseDate
+// evaluated at now, for callers that work with an explicit clock.
+func MovieReleaseStatusFromReleaseDateAt(releaseDate string, now time.Time) string {
 	release := &Release{Type: "theatrical", Date: releaseDate}
 	if !releaseHasDate(release) {
 		return MovieReleaseStatusUnknown
 	}
-	if releaseIsReleased(release) {
-		if releaseIsOlderThan(release, 12, time.Now()) {
+	if releaseIsReleasedAt(release, now) {
+		if releaseIsOlderThan(release, 12, now) {
 			return MovieReleaseStatusReleased
 		}
 		return MovieReleaseStatusTheatrical
@@ -336,6 +353,10 @@ func SeriesEpisodeHasAired(episode SeriesEpisode, now time.Time) bool {
 }
 
 func releaseIsReleased(release *Release) bool {
+	return releaseIsReleasedAt(release, time.Now())
+}
+
+func releaseIsReleasedAt(release *Release, now time.Time) bool {
 	if release == nil {
 		return false
 	}
@@ -343,7 +364,7 @@ func releaseIsReleased(release *Release) bool {
 		return true
 	}
 	if ts, ok := parseReleaseDate(release.Date); ok {
-		return !ts.After(time.Now())
+		return !ts.After(now)
 	}
 	return false
 }
