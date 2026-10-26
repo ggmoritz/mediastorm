@@ -616,14 +616,21 @@ func (s *Server) episodeItem(u *userState, series seriesRef, ep episodeInfo) dto
 		Name: seasonName(ep.Season, ""), TitleID: series.Info.ID, ExternalIDs: series.Info.ExternalIDs,
 		SeriesName: series.Info.Name, Season: ep.Season, Poster: series.Info.Poster, Backdrop: series.Info.Backdrop,
 	})
+	// Progress and history rows carry neither the still nor a current title
+	// ("TBA" when written before the episode aired); what an earlier
+	// listing stored for the episode fills in.
 	name := ep.Name
-	if name == "" || placeholderName(name) {
-		// Progress and history rows keep the title from when they were
-		// written ("TBA" before the episode aired); the stored one may be
-		// newer.
-		if ref, ok := s.ids.get(id); ok && ref.Ctx.Name != "" && !placeholderName(ref.Ctx.Name) {
-			name = ref.Ctx.Name
+	backdrop := series.Info.Backdrop
+	if stored, ok := s.ids.get(id); ok {
+		if (name == "" || placeholderName(name)) && stored.Ctx.Name != "" && !placeholderName(stored.Ctx.Name) {
+			name = stored.Ctx.Name
 		}
+		if ep.Still == "" {
+			ep.Still = stored.Ctx.Thumb
+		}
+		// The episode serves the backdrop it stored first (see imageURLFor);
+		// its tag must name that one.
+		backdrop = firstNonEmpty(stored.Ctx.Backdrop, backdrop)
 	}
 	if name == "" {
 		name = fmt.Sprintf("Episode %d", ep.Episode)
@@ -664,8 +671,15 @@ func (s *Server) episodeItem(u *userState, series seriesRef, ep episodeInfo) dto
 		runtime = int64(ep.RuntimeMinutes) * 60 * ticksPerSecond
 		item.RunTimeTicks = int64Ptr(runtime)
 	}
-	if ep.Still != "" {
+	switch {
+	case ep.Still != "":
 		item.ImageTags = map[string]string{dto.ImagePrimary: imageTag(ep.Still)}
+		item.PrimaryImageAspectRatio = floatPtr(16.0 / 9.0)
+	case backdrop != "":
+		// No still known: the series backdrop stands in (served as the
+		// episode's Primary, see imageURLFor). Clients that show only an
+		// episode's own Primary on landscape cards would show none.
+		item.ImageTags = map[string]string{dto.ImagePrimary: imageTag(backdrop)}
 		item.PrimaryImageAspectRatio = floatPtr(16.0 / 9.0)
 	}
 	if series.Info.Backdrop != "" {

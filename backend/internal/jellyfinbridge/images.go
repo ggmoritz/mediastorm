@@ -102,7 +102,8 @@ func imageURLFor(ref itemRef, imageType string) string {
 	switch imageType {
 	case "primary":
 		if ref.Kind == refEpisode {
-			return firstNonEmpty(c.Thumb, c.Poster)
+			// Without a still the series backdrop keeps the card landscape.
+			return firstNonEmpty(c.Thumb, c.Backdrop, c.Poster)
 		}
 		return firstNonEmpty(c.Poster, c.Thumb)
 	case "backdrop", "art", "banner":
