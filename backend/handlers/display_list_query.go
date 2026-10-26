@@ -365,7 +365,9 @@ func (h *MetadataHandler) queryTrendingList(
 	items []models.TrendingItem,
 	query displayListQueryOptions,
 ) ([]models.TrendingItem, []string, []string) {
-	if query.Active() && userID != "" && h.HistoryService != nil {
+	// Every page carries watch state, not only sorted or filtered ones: clients
+	// draw watched / in-progress badges from it.
+	if userID != "" && h.HistoryService != nil {
 		wh, whErr := h.HistoryService.ListWatchHistory(userID)
 		if whErr == nil {
 			cw, _ := h.HistoryService.ListSeriesStates(userID)

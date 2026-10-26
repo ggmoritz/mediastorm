@@ -1323,7 +1323,8 @@ func (h *MetadataHandler) CustomList(w http.ResponseWriter, r *http.Request) {
 		items = filtered
 	}
 
-	if query.Active() && userID != "" && h.HistoryService != nil {
+	// Watch state on every page (clients badge it), not only when a query filters by it.
+	if userID != "" && h.HistoryService != nil {
 		wh, whErr := h.HistoryService.ListWatchHistory(userID)
 		if whErr == nil {
 			cw, _ := h.HistoryService.ListSeriesStates(userID)

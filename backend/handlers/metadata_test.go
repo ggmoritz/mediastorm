@@ -2423,3 +2423,52 @@ func TestMetadataHandler_SearchYouTubeVideos_ClampsLimit(t *testing.T) {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
+
+func TestMetadataHandler_CustomListCarriesWatchStateWithoutQuery(t *testing.T) {
+	fake := &fakeMetadataService{
+		customListResp: []models.TrendingItem{
+			{Rank: 1, Title: models.Title{ID: "tmdb:movie:1", Name: "Watched", MediaType: "movie", TMDBID: 1}},
+			{Rank: 2, Title: models.Title{ID: "tmdb:movie:2", Name: "Started", MediaType: "movie", TMDBID: 2}},
+			{Rank: 3, Title: models.Title{ID: "tmdb:movie:3", Name: "Unseen", MediaType: "movie", TMDBID: 3}},
+		},
+		customListTotal: 3,
+	}
+	handler := NewMetadataHandler(fake, testConfigManager(t))
+	handler.HistoryService = &fakeMetadataHistoryService{
+		history:  []models.WatchHistoryItem{{MediaType: "movie", ItemID: "tmdb:movie:1", Watched: true}},
+		progress: []models.PlaybackProgress{{MediaType: "movie", ItemID: "tmdb:movie:2", PercentWatched: 40}},
+	}
+
+	// No sort or filter: the default page of a list grid.
+	req := httptest.NewRequest(http.MethodGet, "/api/lists/custom?url=https%3A%2F%2Fmdblist.com%2Flists%2Fa%2Fb&userId=user1&limit=60", nil)
+	rec := httptest.NewRecorder()
+	handler.CustomList(rec, req)
+
+	var payload CustomListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v (status %d)", err, rec.Code)
+	}
+	want := []string{"complete", "partial", "none"}
+	if len(payload.Items) != len(want) {
+		t.Fatalf("got %d items, want %d", len(payload.Items), len(want))
+	}
+	for i, state := range want {
+		if payload.Items[i].Title.WatchState != state {
+			t.Errorf("%s watchState = %q, want %q", payload.Items[i].Title.Name, payload.Items[i].Title.WatchState, state)
+		}
+	}
+}
+
+func TestMetadataHandler_QueryTrendingListCarriesWatchStateWithoutQuery(t *testing.T) {
+	handler := NewMetadataHandler(&fakeMetadataService{}, testConfigManager(t))
+	handler.HistoryService = &fakeMetadataHistoryService{
+		history: []models.WatchHistoryItem{{MediaType: "movie", ItemID: "tmdb:movie:1", Watched: true}},
+	}
+	items := []models.TrendingItem{{Title: models.Title{ID: "tmdb:movie:1", Name: "Watched", MediaType: "movie", TMDBID: 1}}}
+
+	items, _, _ = handler.queryTrendingList("user1", handler.Service, items, displayListQueryOptions{})
+
+	if items[0].Title.WatchState != "complete" {
+		t.Fatalf("watchState = %q, want complete", items[0].Title.WatchState)
+	}
+}
