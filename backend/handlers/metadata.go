@@ -2651,6 +2651,15 @@ func (h *MetadataHandler) TopTen(w http.ResponseWriter, r *http.Request) {
 	items = h.filterTrendingByKids(r.Context(), userID, service, items)
 	items = selectTopTenResponseItems(items, mediaType)
 
+	// Watch state shows under the rank on each card.
+	if userID != "" && h.HistoryService != nil {
+		wh, whErr := h.HistoryService.ListWatchHistory(userID)
+		if whErr == nil {
+			cw, _ := h.HistoryService.ListSeriesStates(userID)
+			pp, _ := h.HistoryService.ListPlaybackProgress(userID)
+			enrichTrendingItems(items, buildWatchStateIndex(wh, cw, pp), service, false)
+		}
+	}
 	enrichTrendingRatings(items, service)
 
 	w.Header().Set("Content-Type", "application/json")

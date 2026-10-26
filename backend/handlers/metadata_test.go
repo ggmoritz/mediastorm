@@ -2472,3 +2472,33 @@ func TestMetadataHandler_QueryTrendingListCarriesWatchStateWithoutQuery(t *testi
 		t.Fatalf("watchState = %q, want complete", items[0].Title.WatchState)
 	}
 }
+
+func TestMetadataHandler_TopTenCarriesWatchState(t *testing.T) {
+	fake := &fakeMetadataService{
+		trendingResp: []models.TrendingItem{
+			{Rank: 1, Title: models.Title{ID: "tmdb:movie:1", Name: "Watched", MediaType: "movie", TMDBID: 1, Poster: &models.Image{URL: "https://image.tmdb.org/t/p/w500/1.jpg"}}},
+			{Rank: 2, Title: models.Title{ID: "tmdb:movie:2", Name: "Unseen", MediaType: "movie", TMDBID: 2, Poster: &models.Image{URL: "https://image.tmdb.org/t/p/w500/2.jpg"}}},
+		},
+	}
+	handler := NewMetadataHandler(fake, testConfigManager(t))
+	handler.HistoryService = &fakeMetadataHistoryService{
+		history: []models.WatchHistoryItem{{MediaType: "movie", ItemID: "tmdb:movie:1", Watched: true}},
+	}
+
+	rec := httptest.NewRecorder()
+	handler.TopTen(rec, httptest.NewRequest(http.MethodGet, "/api/discover/top-ten?type=movie&userId=user1", nil))
+
+	var payload TopTenResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v (status %d)", err, rec.Code)
+	}
+	want := []string{"complete", "none"}
+	if len(payload.Items) != len(want) {
+		t.Fatalf("got %d items, want %d", len(payload.Items), len(want))
+	}
+	for i, state := range want {
+		if payload.Items[i].Title.WatchState != state {
+			t.Errorf("%s watchState = %q, want %q", payload.Items[i].Title.Name, payload.Items[i].Title.WatchState, state)
+		}
+	}
+}
