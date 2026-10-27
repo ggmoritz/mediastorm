@@ -4855,6 +4855,65 @@ func TestEpisodeState_ContinueWatchingUpdatedAtUsesLatestTimestamp(t *testing.T)
 	t.Fatal("Timestamp Show not found in continue watching")
 }
 
+func TestEpisodeState_ShortRewatchProgressSurvivesContinueWatchingBuild(t *testing.T) {
+	// A rewatch too short to take over Continue Watching keeps its progress, so
+	// the episode still resumes from details; only progress no newer than the
+	// watched event is stale.
+	svc, err := NewService(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	seriesID := "tvdb:series:12345"
+	userID := "user-short-rewatch"
+	watchedAt := time.Now().UTC().Add(-time.Hour)
+	svc.SetMetadataService(&mockMetadataService{
+		seriesDetails: &models.SeriesDetails{
+			Title: models.Title{ID: seriesID, Name: "Test Show", TVDBID: 12345},
+			Seasons: []models.SeriesSeason{{
+				Number: 1,
+				Episodes: []models.SeriesEpisode{
+					{ID: "ep-7", Name: "Ep 7", SeasonNumber: 1, EpisodeNumber: 7, AiredDate: "2025-02-12"},
+					{ID: "ep-8", Name: "Ep 8", SeasonNumber: 1, EpisodeNumber: 8, AiredDate: "2025-02-19"},
+				},
+			}},
+		},
+	})
+	watched := true
+	if _, err := svc.UpdateWatchHistory(userID, models.WatchHistoryUpdate{
+		MediaType: "episode", ItemID: seriesID + ":s01e07", Name: "Ep 7",
+		Watched: &watched, WatchedAt: watchedAt, SeriesID: seriesID,
+		SeriesName: "Test Show", SeasonNumber: 1, EpisodeNumber: 7,
+		ExternalIDs: map[string]string{"tvdb": "12345"},
+	}); err != nil {
+		t.Fatalf("UpdateWatchHistory() error = %v", err)
+	}
+	if _, err := svc.UpdatePlaybackProgress(userID, models.PlaybackProgressUpdate{
+		MediaType: "episode", ItemID: seriesID + ":s01e07", Position: 60, Duration: 2400,
+		Timestamp: watchedAt.Add(30 * time.Minute), SeriesID: seriesID, SeriesName: "Test Show",
+		EpisodeName: "Ep 7", SeasonNumber: 1, EpisodeNumber: 7,
+		ExternalIDs: map[string]string{"tvdb": "12345"},
+	}); err != nil {
+		t.Fatalf("UpdatePlaybackProgress() error = %v", err)
+	}
+
+	items, err := svc.ListContinueWatching(userID)
+	if err != nil {
+		t.Fatalf("ListContinueWatching() error = %v", err)
+	}
+	if len(items) != 1 || items[0].NextEpisode == nil || items[0].NextEpisode.EpisodeNumber != 8 {
+		t.Fatalf("expected Continue Watching to stay on episode 8, got %+v", items)
+	}
+	time.Sleep(200 * time.Millisecond) // the async stale-progress cleanup
+
+	progress, _ := svc.ListPlaybackProgress(userID)
+	for _, p := range progress {
+		if p.SeasonNumber == 1 && p.EpisodeNumber == 7 && p.Position == 60 {
+			return
+		}
+	}
+	t.Fatalf("expected the rewatch progress on episode 7 to remain, got %+v", progress)
+}
+
 func TestEpisodeState_MultipleStaleProgressCleanedOnBuild(t *testing.T) {
 	// When multiple stale progress entries exist for the same series,
 	// building continue watching should clean them all up.

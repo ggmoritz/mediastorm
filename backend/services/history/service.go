@@ -1528,6 +1528,8 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 			// the latest watch-history activity for the series.
 			inProgressAlreadyWatched := false
 			inProgressStaleBehindLatestWatched := false
+			// The watched event that made the in-progress entry count as watched.
+			var inProgressWatchedAt time.Time
 			if t.inProgress != nil {
 				// Reconcile absolute episode numbering before comparing against watch
 				// history so a finished episode recorded under its absolute number
@@ -1558,6 +1560,7 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 				// then replaces the on-deck resume target.
 				inProgressAlreadyWatched = !matchingWatchedAt.IsZero() &&
 					(t.inProgress.PercentWatched <= 5 || !t.inProgress.UpdatedAt.After(matchingWatchedAt))
+				inProgressWatchedAt = matchingWatchedAt
 				if !inProgressAlreadyWatched && haveFurthest &&
 					compareEpisodeOrder(furthestSeason, furthestEpisode, inProgressSeason, inProgressEpisode) > 0 &&
 					!t.inProgress.UpdatedAt.After(latestWatchedAt) {
@@ -1598,6 +1601,7 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 							if watchedAt, ok := watchedEpisodeProviderTokens[idType+":"+strings.ToLower(idValue)+":"+ek]; ok &&
 								(t.inProgress.PercentWatched <= 5 || !t.inProgress.UpdatedAt.After(watchedAt)) {
 								inProgressAlreadyWatched = true
+								inProgressWatchedAt = watchedAt
 								break
 							}
 						}
@@ -1607,16 +1611,22 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 					}
 				}
 				if inProgressAlreadyWatched || inProgressStaleBehindLatestWatched {
-					// Clean up all stale progress entries for this series where
-					// the episode is already in watch history, or stale progress
-					// points behind the furthest watched episode for the series.
-					watchedEps := make(map[string]bool, len(t.episodes))
+					// Clean up stale progress entries for this series: progress on an
+					// episode that is no newer than that episode's watched event, and
+					// the in-progress entry when it is stale. Progress newer than the
+					// watched event is a rewatch and is kept, however short, so the
+					// episode can still resume from details.
+					watchedEps := make(map[string]time.Time, len(t.episodes))
 					for _, ep := range t.episodes {
-						watchedEps[episodeKey(ep.SeasonNumber, ep.EpisodeNumber)] = true
+						key := episodeKey(ep.SeasonNumber, ep.EpisodeNumber)
+						if at := watchHistoryActivityTime(ep); at.After(watchedEps[key]) {
+							watchedEps[key] = at
+						}
 					}
 					seriesExtIDs := t.inProgress.ExternalIDs
 					targetSeason := t.inProgress.SeasonNumber
 					targetEpisode := t.inProgress.EpisodeNumber
+					removeTarget := inProgressStaleBehindLatestWatched || !t.inProgress.UpdatedAt.After(inProgressWatchedAt)
 					userID := userID
 					go func() {
 						s.mu.Lock()
@@ -1633,8 +1643,9 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 							if !hasMatchingExternalID(prog.ExternalIDs, seriesExtIDs) {
 								continue
 							}
-							if watchedEps[episodeKey(prog.SeasonNumber, prog.EpisodeNumber)] ||
-								(prog.SeasonNumber == targetSeason && prog.EpisodeNumber == targetEpisode) {
+							watchedAt, watched := watchedEps[episodeKey(prog.SeasonNumber, prog.EpisodeNumber)]
+							isTarget := prog.SeasonNumber == targetSeason && prog.EpisodeNumber == targetEpisode
+							if (watched && !prog.UpdatedAt.After(watchedAt)) || (isTarget && removeTarget) {
 								log.Printf("[history] cleaning up stale progress %s (episode already watched)", key)
 								s.removePlaybackProgressEntryLocked(userID, perUser, key, prog)
 								cleaned++
