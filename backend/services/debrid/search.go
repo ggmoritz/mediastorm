@@ -71,6 +71,10 @@ type SearchOptions struct {
 	EpisodeReleased       bool                        // True only when metadata confirms the target episode has aired
 	SkipFilter            bool                        // When true, skip result filtering (used by SearchTest)
 	SeasonPacksOnly       bool                        // When true, keep only releases that cover the whole target season
+	// SkipIMDBScrapers skips scrapers that look up by IMDB ID and ignore the
+	// query text (AIOStreams, Torrentio, direct Stremio). Alternate-title
+	// searches set it so those scrapers run once, not once per title.
+	SkipIMDBScrapers bool
 }
 
 // SearchService coordinates queries against configured debrid providers.
@@ -589,6 +593,9 @@ func (s *SearchService) Search(ctx context.Context, opts SearchOptions) ([]model
 		switch identityScraper.(type) {
 		case *AIOStreamsScraper, *TorrentioScraper, *DirectStremioScraper:
 			imdbBased = true
+		}
+		if imdbBased && opts.SkipIMDBScrapers {
+			continue
 		}
 		for _, providerReq := range mappedSearchRequests(req, imdbBased) {
 			scraperCount++

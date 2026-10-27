@@ -124,3 +124,48 @@ func TestDebridVariantsCarryFilterQuery(t *testing.T) {
 		}
 	}
 }
+
+type imdbSkipRecordingDebrid struct {
+	mu   sync.Mutex
+	skip map[string]bool // query -> SkipIMDBScrapers
+}
+
+func (s *imdbSkipRecordingDebrid) Search(_ context.Context, opts debrid.SearchOptions) ([]models.NZBResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.skip[opts.Query] = opts.SkipIMDBScrapers
+	return nil, nil
+}
+
+// IMDB-based scrapers ignore the query text, so only the base query runs them;
+// alternate titles would otherwise repeat the same AIOStreams/Torrentio request.
+func TestDebridAlternateTitlesSkipIMDBScrapers(t *testing.T) {
+	provider := &imdbSkipRecordingDebrid{skip: map[string]bool{}}
+	svc := &Service{debrid: provider}
+	base := debrid.SearchOptions{Query: "VisionQuest S01E03", MediaType: "series", IMDBID: "tt23112594"}
+	opts := SearchOptions{Query: "VisionQuest S01E03", MediaType: "series", IMDBID: "tt23112594"}
+	if _, err := svc.searchDebridTitles(context.Background(), base, opts, []string{"Vision Quest", "Kvest Vizhena"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.skip) < 3 {
+		t.Fatalf("expected base plus alternate title searches, got %v", provider.skip)
+	}
+	for query, skip := range provider.skip {
+		if want := query != base.Query; skip != want {
+			t.Errorf("query %q SkipIMDBScrapers=%v, want %v", query, skip, want)
+		}
+	}
+
+	// Without an IMDB ID the debrid service may resolve one per title, so
+	// every title keeps its IMDB scrapers.
+	provider.skip = map[string]bool{}
+	base.IMDBID, opts.IMDBID = "", ""
+	if _, err := svc.searchDebridTitles(context.Background(), base, opts, []string{"Vision Quest"}); err != nil {
+		t.Fatal(err)
+	}
+	for query, skip := range provider.skip {
+		if skip {
+			t.Errorf("query %q skipped IMDB scrapers without an IMDB ID", query)
+		}
+	}
+}

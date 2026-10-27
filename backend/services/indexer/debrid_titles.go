@@ -3,6 +3,7 @@ package indexer
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"novastream/models"
@@ -27,6 +28,9 @@ func (s *Service) searchDebridTitles(ctx context.Context, base debrid.SearchOpti
 			search := base
 			search.Query = query
 			search.FilterQuery = base.Query
+			// IMDB-based scrapers return the same streams for every title, and
+			// repeating them can trip provider rate limits (AIOStreams).
+			search.SkipIMDBScrapers = i > 0 && strings.TrimSpace(base.IMDBID) != ""
 			batches[i].results, batches[i].err = s.debrid.Search(ctx, search)
 		})
 	}

@@ -1812,9 +1812,7 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 		aggregated = limited
 	}
 
-	if opts.MaxResults > 0 && len(aggregated) > opts.MaxResults {
-		aggregated = aggregated[:opts.MaxResults]
-	}
+	aggregated = capPerService(aggregated, opts.MaxResults, func(r models.NZBResult) models.ContentServiceType { return r.ServiceType })
 
 	// Add daily show attributes to all results for file matching.
 	if annotateDailySearchResults(aggregated, opts) {
@@ -2012,11 +2010,30 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 }
 
 func capScoredResults(results []models.ScoredNZBResult, max int) []models.ScoredNZBResult {
+	capped := capPerService(results, max, func(r models.ScoredNZBResult) models.ContentServiceType { return r.ServiceType })
+	if len(capped) < len(results) {
+		log.Printf("[indexer] MaxResults=%d per service applied after ranking: %d -> %d", max, len(results), len(capped))
+	}
+	return capped
+}
+
+// capPerService keeps at most max results of each service type, in order.
+// Hybrid ranking can put every result of the preferred service first, so one
+// overall cap would drop the other service from the list entirely.
+func capPerService[T any](results []T, max int, service func(T) models.ContentServiceType) []T {
 	if max <= 0 || len(results) <= max {
 		return results
 	}
-	log.Printf("[indexer] MaxResults=%d applied after ranking: %d -> %d", max, len(results), max)
-	return results[:max]
+	counts := make(map[models.ContentServiceType]int)
+	capped := make([]T, 0, len(results))
+	for _, r := range results {
+		st := service(r)
+		if counts[st] < max {
+			counts[st]++
+			capped = append(capped, r)
+		}
+	}
+	return capped
 }
 
 // ScoredSplitSearchResult is one split search source's completed output. Each
