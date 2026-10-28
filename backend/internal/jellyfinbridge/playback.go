@@ -56,11 +56,10 @@ type playSession struct {
 	segmentsDone      bool
 	state             *playState // last playback report; nil until playback starts
 	reissued          time.Time  // last time PlaybackInfo handed this session out again
-	// serverSubtitle is the default subtitle PlaybackInfo handed out (nil
-	// when the client asked for one); subtitlePicked turns true once the
-	// client reports a different one. Only picks are remembered per series.
-	serverSubtitle *int
-	subtitlePicked bool
+	// audioPick and subtitlePick tell the viewer's picks from the defaults
+	// PlaybackInfo handed out; only picks are remembered per series.
+	audioPick    pickState
+	subtitlePick pickState
 }
 
 // playState is the client's last playback report, for GET /Sessions.
@@ -573,8 +572,12 @@ func (s *Server) vodMediaSource(r *http.Request, p *principal, sess *playSession
 		audio = status.SelectedAudioTrack
 		subtitle = status.SelectedSubtitleTrack
 	}
-	// The subtitle picked in the series' previous episode wins over
-	// mediastorm's own default (Jellyfin's RememberSubtitleSelections).
+	// The audio and subtitle picked earlier in the series (in a previous
+	// episode or this one) win over mediastorm's own defaults (Jellyfin's
+	// RememberAudioSelections and RememberSubtitleSelections).
+	if remembered, ok := s.rememberedAudio(p.Profile.ID, sess.Ref, status); ok {
+		audio, audioFrom = remembered, "remembered"
+	}
 	if remembered, ok := s.rememberedSubtitle(p.Profile.ID, sess.Ref, status); ok {
 		subtitle, subtitleFrom = remembered, "remembered"
 	}
@@ -585,11 +588,8 @@ func (s *Server) vodMediaSource(r *http.Request, p *principal, sess *playSession
 		subtitle, subtitleFrom = *req.SubtitleStreamIndex, "request"
 	}
 	sess.mu.Lock()
-	if subtitleFrom == "request" {
-		sess.subtitlePicked = true // the client chose it: a pick to remember
-	} else {
-		sess.serverSubtitle = intPtr(subtitle)
-	}
+	sess.audioPick.handedOut(audio, audioFrom == "request")
+	sess.subtitlePick.handedOut(subtitle, subtitleFrom == "request")
 	sess.mu.Unlock()
 	if trackLogs {
 		log.Printf("[jellyfin-bridge] tracks %s (%s): default audio=%s (%s) subtitle=%s (%s); available %s",
@@ -836,16 +836,19 @@ func (s *Server) handlePlaybackReport(kind string) http.HandlerFunc {
 		if sess != nil && kind != "stopped" {
 			changed := trackLogs && sess.tracksChanged(rep)
 			sess.recordState(rep)
-			outcome := ""
+			audioOutcome, subtitleOutcome := "-", "-"
+			if rep.AudioIndex != nil {
+				audioOutcome = s.rememberAudio(p, sess, *rep.AudioIndex)
+			}
 			if rep.SubtitleIndex != nil {
-				outcome = s.rememberSubtitle(p, sess, *rep.SubtitleIndex)
+				subtitleOutcome = s.rememberSubtitle(p, sess, *rep.SubtitleIndex)
 			}
 			if changed {
 				sess.mu.Lock()
 				status := sess.status
 				sess.mu.Unlock()
-				log.Printf("[jellyfin-bridge] report %s %s (%s): audio=%s subtitle=%s; subtitle memory: %s",
-					kind, sess.ItemID, p.Client.Client, describeReported(status, rep.AudioIndex, true), describeReported(status, rep.SubtitleIndex, false), outcome)
+				log.Printf("[jellyfin-bridge] report %s %s (%s): audio=%s subtitle=%s; audio memory: %s, subtitle memory: %s",
+					kind, sess.ItemID, p.Client.Client, describeReported(status, rep.AudioIndex, true), describeReported(status, rep.SubtitleIndex, false), audioOutcome, subtitleOutcome)
 			}
 			s.keepAliveHLS(r.Context(), p, sess)
 			if kind == "start" && sess.Ref.Kind == refEpisode {
