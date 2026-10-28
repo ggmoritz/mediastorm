@@ -33,7 +33,7 @@ func newPrefsStore(path string) *prefsStore {
 }
 
 // newNamedPrefsStore is a prefsStore for other per-profile documents (such as
-// remembered subtitle picks), with its own name in the log and its own limit.
+// remembered track picks), with its own name in the log and its own limit.
 func newNamedPrefsStore(path, name string, limit int) *prefsStore {
 	p := &prefsStore{name: name, limit: limit, path: path, data: map[string]json.RawMessage{}, stop: make(chan struct{}), done: make(chan struct{})}
 	if path != "" {

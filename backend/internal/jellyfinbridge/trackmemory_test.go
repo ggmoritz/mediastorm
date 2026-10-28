@@ -95,7 +95,7 @@ func TestSubtitlePickCarriesToNextEpisode(t *testing.T) {
 	if got := defaultSub(play(first, 0)); got != -1 {
 		t.Fatalf("after turning subtitles off the default = %d, want off", got)
 	}
-	if v, ok := h.srv.subtitles.get(subtitleMemoryKey(h.alice.ID, seriesInfoFromSeasonRef(mustRef(t, h.srv, second)).source())); !ok || !strings.Contains(string(v), `"off":true`) {
+	if v, ok := h.srv.tracks.get(subtitleMemoryKey(h.alice.ID, seriesInfoFromSeasonRef(mustRef(t, h.srv, second)).source())); !ok || !strings.Contains(string(v), `"off":true`) {
 		t.Fatalf("stored choice = %s", v)
 	}
 }
@@ -130,7 +130,7 @@ func TestReportWithoutPlaySessionIDFindsTheSession(t *testing.T) {
 		"ItemId": item, "MediaSourceId": info.MediaSources[0].ID, "PositionTicks": int64(60) * ticksPerSecond, "SubtitleStreamIndex": 3,
 	})
 	key := subtitleMemoryKey(h.alice.ID, seriesInfoFromSeasonRef(mustRef(t, h.srv, item)).source())
-	if v, ok := h.srv.subtitles.get(key); !ok || !strings.Contains(string(v), `"language":"deu"`) {
+	if v, ok := h.srv.tracks.get(key); !ok || !strings.Contains(string(v), `"language":"deu"`) {
 		t.Fatalf("subtitle pick from a report without PlaySessionId not learned: %s", v)
 	}
 	sess, _ := h.srv.plays.get(info.PlaySessionID)
@@ -187,17 +187,124 @@ func TestReportsWithoutPlaySessionIDStopAndOnlyLearnPicks(t *testing.T) {
 
 	report("/Sessions/Playing", -1) // the default the bridge handed out
 	report("/Sessions/Playing/Progress", -1)
-	if v, ok := h.srv.subtitles.get(key); ok {
+	if v, ok := h.srv.tracks.get(key); ok {
 		t.Fatalf("the server's default was remembered as a pick: %s", v)
 	}
 	report("/Sessions/Playing/Progress", 3)  // the viewer turns on forced German
 	report("/Sessions/Playing/Progress", -1) // and off again: that is a pick too
-	if v, ok := h.srv.subtitles.get(key); !ok || !strings.Contains(string(v), `"off":true`) {
+	if v, ok := h.srv.tracks.get(key); !ok || !strings.Contains(string(v), `"off":true`) {
 		t.Fatalf("stored choice = %s", v)
 	}
 
 	report("/Sessions/Playing/Stopped", -1)
 	if _, ok := h.srv.plays.get(info.PlaySessionID); ok {
 		t.Error("a stop report without PlaySessionId must end the play session")
+	}
+}
+
+// The audio language picked in an episode becomes the default when the
+// episode is opened again and in the series' next episodes (Jellyfin's
+// RememberAudioSelections): Plezy only carries it when it moves to the next
+// episode itself.
+func TestAudioPickCarriesAcrossEpisodes(t *testing.T) {
+	h := newHarness(t, config.JellyfinBridgeSettings{})
+	installFakePlayback(t, h)
+	// mediastorm defaults to English. The second episode's release has two
+	// Japanese tracks; the third has none.
+	var calls atomic.Int32
+	h.srv.deps.Handlers.PrequeueStatus = func(w http.ResponseWriter, r *http.Request) {
+		audio := []playback.AudioTrackInfo{{Index: 1, Codec: "eac3", Language: "ger"}, {Index: 2, Codec: "eac3", Language: "jpn"}, {Index: 3, Codec: "eac3", Language: "eng"}}
+		selected := 3
+		switch calls.Load() {
+		case 1:
+			audio = []playback.AudioTrackInfo{{Index: 1, Codec: "aac", Language: "eng"}, {Index: 2, Codec: "aac", Language: "jpn"}, {Index: 3, Codec: "flac", Language: "jpn"}}
+			selected = 1
+		case 2:
+			audio = []playback.AudioTrackInfo{{Index: 1, Codec: "aac", Language: "deu"}, {Index: 2, Codec: "aac", Language: "eng"}}
+			selected = 2
+		}
+		writeJSON(w, http.StatusOK, playback.PrequeueStatusResponse{
+			PrequeueID: "pq1", Status: playback.PrequeueStatusReady, StreamPath: "/webdav/episode.mkv",
+			SelectedAudioTrack: selected, SelectedSubtitleTrack: -1, AudioTracks: audio,
+		})
+	}
+	tok := h.login("Living Room", "alice-pass")
+	next := decode[dto.QueryResult[dto.BaseItemDto]](t, h.do(http.MethodGet, "/Shows/NextUp", tok, nil))
+	seriesID := next.Items[0].SeriesID
+	seasons := decode[dto.QueryResult[dto.BaseItemDto]](t, h.do(http.MethodGet, "/Shows/"+seriesID+"/Seasons", tok, nil))
+	eps := decode[dto.QueryResult[dto.BaseItemDto]](t, h.do(http.MethodGet, "/Shows/"+seriesID+"/Episodes?SeasonId="+seasons.Items[0].ID, tok, nil))
+	first, second := eps.Items[0].ID, eps.Items[1].ID
+	play := func(item string, release int32) int {
+		calls.Store(release)
+		info := decode[dto.PlaybackInfoResponse](t, h.do(http.MethodPost, "/Items/"+item+"/PlaybackInfo", tok, map[string]any{}))
+		if d := info.MediaSources[0].DefaultAudioStreamIndex; d != nil {
+			return *d
+		}
+		return -1
+	}
+	report := func(item string, audio int) {
+		calls.Store(-1) // keep the session's own status
+		h.do(http.MethodPost, "/Sessions/Playing/Progress", tok, map[string]any{"ItemId": item, "PositionTicks": int64(60) * ticksPerSecond, "AudioStreamIndex": audio})
+	}
+	key := audioMemoryKey(h.alice.ID, seriesInfoFromSeasonRef(mustRef(t, h.srv, first)).source())
+
+	if got := play(first, 0); got != 3 {
+		t.Fatalf("first play default audio = %d, want mediastorm's English (3)", got)
+	}
+	report(first, 3) // the default the bridge handed out
+	if v, ok := h.srv.tracks.get(key); ok {
+		t.Fatalf("the server's default was remembered as a pick: %s", v)
+	}
+	report(first, 2) // the viewer switches to Japanese
+	if v, ok := h.srv.tracks.get(key); !ok || !strings.Contains(string(v), `"language":"jpn"`) {
+		t.Fatalf("stored choice = %s", v)
+	}
+
+	// Opening the episode again (Plezy reuses the play session).
+	if got := play(first, 0); got != 2 {
+		t.Fatalf("reopened episode default audio = %d, want Japanese (2)", got)
+	}
+	// The next episode: the first Japanese track, as mediastorm's default is English.
+	h.srv.plays = newPlaySessions()
+	if got := play(second, 1); got != 2 {
+		t.Fatalf("next episode default audio = %d, want the first Japanese track (2)", got)
+	}
+	// No Japanese track: mediastorm's default stays.
+	h.srv.plays = newPlaySessions()
+	if got := play(second, 2); got != 2 {
+		t.Fatalf("without Japanese the default = %d, want mediastorm's English (2)", got)
+	}
+}
+
+// A Japanese default mediastorm picked stays when Japanese is remembered.
+func TestRememberedAudioKeepsMediastormsTrackOfThatLanguage(t *testing.T) {
+	s := &Server{tracks: newNamedPrefsStore("", "track choices", maxTrackChoicesPerProfile)}
+	t.Cleanup(s.tracks.close)
+	ref := itemRef{Kind: refEpisode, Source: "tmdb:tv:1:s1e1"}
+	s.tracks.set(audioMemoryKey("p", seriesInfoFromSeasonRef(ref).source()), []byte(`{"language":"jpn"}`))
+	status := &playback.PrequeueStatusResponse{
+		SelectedAudioTrack: 3,
+		AudioTracks:        []playback.AudioTrackInfo{{Index: 1, Language: "eng"}, {Index: 2, Language: "jpn"}, {Index: 3, Language: "ja"}},
+	}
+	if got, ok := s.rememberedAudio("p", ref, status); !ok || got != 3 {
+		t.Fatalf("rememberedAudio = %d, %v; want mediastorm's Japanese track 3", got, ok)
+	}
+}
+
+// A client that sends the default it was handed back with its next
+// PlaybackInfo has not picked anything.
+func TestPickStateIgnoresRequestedDefault(t *testing.T) {
+	var ps pickState
+	ps.handedOut(3, false)
+	ps.handedOut(3, true)
+	if ps.reported(3) {
+		t.Fatal("the echoed default counted as a pick")
+	}
+	if !ps.reported(2) || !ps.reported(3) {
+		t.Fatal("a changed track is a pick, and later reports stay picks")
+	}
+	ps.handedOut(2, true)
+	if !ps.picked {
+		t.Fatal("asking for another track is a pick")
 	}
 }

@@ -44,9 +44,9 @@ type Server struct {
 	serverID string
 	ids      *idStore
 	prefs    *prefsStore
-	// subtitles remembers the subtitle picked per profile and series
-	// (subtitleChoice), for the next episode's default.
-	subtitles *prefsStore
+	// tracks remembers the audio and subtitle picked per profile and series
+	// (audioChoice, subtitleChoice), for the next episode's defaults.
+	tracks    *prefsStore
 	plays     *playSessions
 	releases  *releaseCache
 	autoPicks *autoPicks
@@ -97,11 +97,11 @@ func New(deps Deps, cfg config.JellyfinBridgeSettings) *Server {
 	}
 	idPath := ""
 	prefsPath := ""
-	subtitlesPath := ""
+	tracksPath := ""
 	if deps.CacheDir != "" {
 		idPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "item_ids.json")
 		prefsPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "display_prefs.json")
-		subtitlesPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "subtitle_choices.json")
+		tracksPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "track_choices.json")
 	}
 	s := &Server{
 		deps:      deps,
@@ -109,7 +109,7 @@ func New(deps Deps, cfg config.JellyfinBridgeSettings) *Server {
 		serverID:  serverID,
 		ids:       newIDStore(idPath),
 		prefs:     newPrefsStore(prefsPath),
-		subtitles: newNamedPrefsStore(subtitlesPath, "subtitle choices", maxSubtitleChoicesPerProfile),
+		tracks:    newNamedPrefsStore(tracksPath, "track choices", maxTrackChoicesPerProfile),
 		plays:     newPlaySessions(),
 		releases:  newReleaseCache(),
 		autoPicks: newAutoPicks(),
@@ -210,7 +210,7 @@ func (s *Server) Start() error {
 		// discarded, so stop them here.
 		s.ids.close()
 		s.prefs.close()
-		s.subtitles.close()
+		s.tracks.close()
 		return fmt.Errorf("jellyfin bridge listen on %s: %w", addr, err)
 	}
 	s.httpSrv = &http.Server{
@@ -264,7 +264,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.plays.closeAll(s)
 	s.ids.close()
 	s.prefs.close()
-	s.subtitles.close()
+	s.tracks.close()
 	s.started = false
 	return err
 }
