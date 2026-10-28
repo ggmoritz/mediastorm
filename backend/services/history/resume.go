@@ -8,14 +8,23 @@ import (
 	"novastream/models"
 )
 
-// Resume thresholds. An item is offered for resume only when its watched
-// percentage is strictly between these bounds. They mirror the rule clients
-// applied locally before resume became server-computed (percent > 5 and
-// percent < 95), so moving the decision server-side does not change behaviour.
+// Resume thresholds. Progress counts as "started" once it passes either floor
+// (ResumeMinSeconds of playback or ResumeMinPercent of the runtime, whichever
+// comes first), so a long film keeps its place after a few minutes while a
+// short episode still needs more than a glance. Resume stays on offer until
+// ResumeMaxPercent.
 const (
+	ResumeMinSeconds = 120.0
 	ResumeMinPercent = 5.0
 	ResumeMaxPercent = 95.0
 )
+
+// MeetsResumeFloor reports whether progress is far enough in to count as
+// started: past ResumeMinSeconds or past ResumeMinPercent. Position is seconds
+// (0 when only a percentage is known, e.g. Trakt imports); percent is 0–100.
+func MeetsResumeFloor(position, percent float64) bool {
+	return position > ResumeMinSeconds || percent > ResumeMinPercent
+}
 
 // ComputeResume builds the server resume decision for a playback position.
 // Position and duration are seconds. When duration is unknown (<= 0) the
@@ -37,7 +46,7 @@ func ComputeResume(position, duration, percent float64) models.ResumeState {
 		Position: position,
 		Duration: max(duration, 0),
 		Percent:  percent,
-		Eligible: percent > ResumeMinPercent && percent < ResumeMaxPercent,
+		Eligible: MeetsResumeFloor(position, percent) && percent < ResumeMaxPercent,
 	}
 }
 

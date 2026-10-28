@@ -184,7 +184,7 @@ func TestListContinueWatchingFallsBackToFullDetailsForTMDBOnlySeries(t *testing.
 	_, err = svc.UpdatePlaybackProgress("default", models.PlaybackProgressUpdate{
 		MediaType:     "episode",
 		ItemID:        "tmdb:tv:107124:S01E01",
-		Position:      30,
+		Position:      300,
 		Duration:      1200,
 		SeriesID:      "tmdb:tv:107124",
 		SeriesName:    "Animaniacs",

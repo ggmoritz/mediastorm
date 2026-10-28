@@ -6,6 +6,7 @@ import (
 
 	"novastream/internal/mediaidentity"
 	"novastream/models"
+	"novastream/services/history"
 )
 
 func stringSliceContainsFold(values []string, target string) bool {
@@ -30,8 +31,9 @@ type releasedEpisodeCountProvider interface {
 }
 
 type movieState struct {
-	watched bool
-	percent float64
+	watched  bool
+	percent  float64
+	position float64
 }
 
 type seriesState struct {
@@ -151,6 +153,9 @@ func buildWatchStateIndex(
 				if pp.PercentWatched > m.percent {
 					m.percent = pp.PercentWatched
 				}
+				if pp.Position > m.position {
+					m.position = pp.Position
+				}
 				idx.movies[key] = m
 			}
 		}
@@ -182,11 +187,14 @@ func (idx *watchStateIndex) computeWithExternalIDs(mediaType, itemID string, ext
 			if candidate.percent > m.percent {
 				m.percent = candidate.percent
 			}
+			if candidate.position > m.position {
+				m.position = candidate.position
+			}
 		}
 		if m.watched || m.percent >= 90 {
 			return "complete", nil
 		}
-		if m.percent >= 5 {
+		if history.MeetsResumeFloor(m.position, m.percent) {
 			return "partial", nil
 		}
 		return "none", nil

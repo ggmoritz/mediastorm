@@ -1401,9 +1401,18 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 		}
 	}
 
-	// Also consider series with only in-progress items (no completed episodes)
+	// Also consider series with only in-progress items (no completed episodes).
+	// Without other watch history, a below-floor episode is a sample rather than
+	// a started show, so it doesn't put the series on continue watching.
 	for seriesID, prog := range inProgressBySeriesCache {
-		if _, exists := seriesInfo[seriesID]; !exists && prog.SeriesName != "" {
+		if _, exists := seriesInfo[seriesID]; exists {
+			continue
+		}
+		if !MeetsResumeFloor(prog.Position, prog.PercentWatched) {
+			delete(inProgressBySeriesCache, seriesID)
+			continue
+		}
+		if prog.SeriesName != "" {
 			// Create a minimal watch history item for metadata purposes
 			seriesInfo[seriesID] = models.WatchHistoryItem{
 				SeriesID:      prog.SeriesID,
@@ -1440,9 +1449,9 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 			continue
 		}
 
-		// Only include movies with 5-90% progress (resume watching)
-		// Movies with <5% watched are excluded as they likely weren't really started
-		if prog.MediaType == "movie" && prog.PercentWatched >= 5 && prog.PercentWatched < 90 {
+		// Only include movies past the resume floor and under 90% (resume
+		// watching); anything shorter likely wasn't really started.
+		if prog.MediaType == "movie" && MeetsResumeFloor(prog.Position, prog.PercentWatched) && prog.PercentWatched < 90 {
 			moviesToProcess = append(moviesToProcess, prog)
 		}
 	}
@@ -1556,10 +1565,10 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 					}
 				}
 				// Progress at or before the watched event is stale. Newer progress
-				// counts as a rewatch only after more than 5% has been watched,
-				// then replaces the on-deck resume target.
+				// counts as a rewatch only once it passes the resume floor, then
+				// replaces the on-deck resume target.
 				inProgressAlreadyWatched = !matchingWatchedAt.IsZero() &&
-					(t.inProgress.PercentWatched <= 5 || !t.inProgress.UpdatedAt.After(matchingWatchedAt))
+					(!MeetsResumeFloor(t.inProgress.Position, t.inProgress.PercentWatched) || !t.inProgress.UpdatedAt.After(matchingWatchedAt))
 				inProgressWatchedAt = matchingWatchedAt
 				if !inProgressAlreadyWatched && haveFurthest &&
 					compareEpisodeOrder(furthestSeason, furthestEpisode, inProgressSeason, inProgressEpisode) > 0 &&
@@ -1599,7 +1608,7 @@ func (s *Service) buildSeriesStatesWithIdentityRepair(ctx context.Context, userI
 						}
 						for _, ek := range episodeKeys {
 							if watchedAt, ok := watchedEpisodeProviderTokens[idType+":"+strings.ToLower(idValue)+":"+ek]; ok &&
-								(t.inProgress.PercentWatched <= 5 || !t.inProgress.UpdatedAt.After(watchedAt)) {
+								(!MeetsResumeFloor(t.inProgress.Position, t.inProgress.PercentWatched) || !t.inProgress.UpdatedAt.After(watchedAt)) {
 								inProgressAlreadyWatched = true
 								inProgressWatchedAt = watchedAt
 								break
