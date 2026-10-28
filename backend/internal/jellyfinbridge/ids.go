@@ -158,13 +158,52 @@ func (s *idStore) putTrusted(kind, source string, ctx refContext) string {
 	return id
 }
 
-// fillContext copies only fields that are empty in base.
+// refreshEpisode updates a stored episode's title and still from the
+// metadata service. Unlike putTrusted it leaves the series details alone:
+// an episode can be listed from a profile's watch history, and refs are
+// shared by every profile, so that part may only fill gaps.
+func (s *idStore) refreshEpisode(id, name, thumb string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ref, ok := s.refs[id]
+	if !ok {
+		return
+	}
+	changed := false
+	if name != "" && !placeholderName(name) && ref.Ctx.Name != name {
+		ref.Ctx.Name, changed = name, true
+	}
+	if thumb != "" && ref.Ctx.Thumb != thumb {
+		ref.Ctx.Thumb, changed = thumb, true
+	}
+	if changed {
+		s.refs[id] = ref
+		s.dirty = true
+	}
+}
+
+// placeholderName reports titles metadata providers use for episodes that
+// have no name yet.
+func placeholderName(name string) bool {
+	switch strings.ToUpper(strings.TrimSpace(name)) {
+	case "TBA", "TBD", "TBC":
+		return true
+	}
+	return false
+}
+
+// fillContext copies only fields that are empty in base (a placeholder
+// title counts as empty).
 func fillContext(base, in refContext) refContext {
 	out := base
 	fill := func(dst *string, v string) {
 		if *dst == "" {
 			*dst = v
 		}
+	}
+	// A placeholder title from before an episode aired is no real value.
+	if placeholderName(out.Name) && in.Name != "" {
+		out.Name = in.Name
 	}
 	fill(&out.Name, in.Name)
 	fill(&out.TitleID, in.TitleID)
@@ -216,7 +255,9 @@ func (s *idStore) get(id string) (itemRef, bool) {
 
 func mergeContext(base, in refContext) refContext {
 	out := base
-	if in.Name != "" {
+	// A placeholder never replaces a real title (stale continue-watching
+	// data can still say "TBA").
+	if in.Name != "" && (!placeholderName(in.Name) || base.Name == "") {
 		out.Name = in.Name
 	}
 	if in.Year != 0 {

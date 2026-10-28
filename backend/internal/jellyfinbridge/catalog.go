@@ -561,6 +561,10 @@ type episodeInfo struct {
 	Still          string
 	RuntimeMinutes int
 	AirDate        string
+	// FromMetadata marks data from the metadata service (episode lists,
+	// continue watching): its title and still replace what an earlier listing
+	// stored, such as a "TBA" title from before the episode aired.
+	FromMetadata bool
 }
 
 func episodeFromMetadata(ep models.SeriesEpisode) episodeInfo {
@@ -571,6 +575,7 @@ func episodeFromMetadata(ep models.SeriesEpisode) episodeInfo {
 		Overview:       ep.Overview,
 		RuntimeMinutes: ep.Runtime,
 		AirDate:        firstNonEmpty(ep.AiredDateTimeUTC, ep.AiredDate),
+		FromMetadata:   true,
 	}
 	if ep.Image != nil {
 		info.Still = ep.Image.URL
@@ -586,6 +591,7 @@ func episodeFromReference(ref models.EpisodeReference) episodeInfo {
 		Overview:       ref.Overview,
 		RuntimeMinutes: ref.RuntimeMinutes,
 		AirDate:        firstNonEmpty(ref.AirDateTimeUTC, ref.AirDate),
+		FromMetadata:   true,
 	}
 	if ref.Image != nil {
 		info.Still = ref.Image.URL
@@ -603,11 +609,22 @@ func (s *Server) episodeItem(u *userState, series seriesRef, ep episodeInfo) dto
 	ctx.Thumb = ep.Still
 	ctx.Poster = firstNonEmpty(ep.Still, series.Info.Poster)
 	id := s.ids.put(refEpisode, src, ctx)
+	if ep.FromMetadata {
+		s.ids.refreshEpisode(id, ep.Name, ep.Still)
+	}
 	seasonID := s.ids.put(refSeason, seasonSource(series.Src, ep.Season), refContext{
 		Name: seasonName(ep.Season, ""), TitleID: series.Info.ID, ExternalIDs: series.Info.ExternalIDs,
 		SeriesName: series.Info.Name, Season: ep.Season, Poster: series.Info.Poster, Backdrop: series.Info.Backdrop,
 	})
 	name := ep.Name
+	if name == "" || placeholderName(name) {
+		// Progress and history rows keep the title from when they were
+		// written ("TBA" before the episode aired); the stored one may be
+		// newer.
+		if ref, ok := s.ids.get(id); ok && ref.Ctx.Name != "" && !placeholderName(ref.Ctx.Name) {
+			name = ref.Ctx.Name
+		}
+	}
 	if name == "" {
 		name = fmt.Sprintf("Episode %d", ep.Episode)
 	}
