@@ -39,11 +39,14 @@ const productName = "Jellyfin Server"
 
 // Server is the Jellyfin-compatible HTTP listener.
 type Server struct {
-	deps      Deps
-	cfg       config.JellyfinBridgeSettings
-	serverID  string
-	ids       *idStore
-	prefs     *prefsStore
+	deps     Deps
+	cfg      config.JellyfinBridgeSettings
+	serverID string
+	ids      *idStore
+	prefs    *prefsStore
+	// subtitles remembers the subtitle picked per profile and series
+	// (subtitleChoice), for the next episode's default.
+	subtitles *prefsStore
 	plays     *playSessions
 	releases  *releaseCache
 	autoPicks *autoPicks
@@ -94,9 +97,11 @@ func New(deps Deps, cfg config.JellyfinBridgeSettings) *Server {
 	}
 	idPath := ""
 	prefsPath := ""
+	subtitlesPath := ""
 	if deps.CacheDir != "" {
 		idPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "item_ids.json")
 		prefsPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "display_prefs.json")
+		subtitlesPath = filepath.Join(deps.CacheDir, "jellyfin_bridge", "subtitle_choices.json")
 	}
 	s := &Server{
 		deps:      deps,
@@ -104,6 +109,7 @@ func New(deps Deps, cfg config.JellyfinBridgeSettings) *Server {
 		serverID:  serverID,
 		ids:       newIDStore(idPath),
 		prefs:     newPrefsStore(prefsPath),
+		subtitles: newNamedPrefsStore(subtitlesPath, "subtitle choices", maxSubtitleChoicesPerProfile),
 		plays:     newPlaySessions(),
 		releases:  newReleaseCache(),
 		autoPicks: newAutoPicks(),
@@ -204,6 +210,7 @@ func (s *Server) Start() error {
 		// discarded, so stop them here.
 		s.ids.close()
 		s.prefs.close()
+		s.subtitles.close()
 		return fmt.Errorf("jellyfin bridge listen on %s: %w", addr, err)
 	}
 	s.httpSrv = &http.Server{
@@ -257,6 +264,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.plays.closeAll(s)
 	s.ids.close()
 	s.prefs.close()
+	s.subtitles.close()
 	s.started = false
 	return err
 }

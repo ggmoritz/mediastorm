@@ -569,10 +569,7 @@ func (s *Server) handleSubtitle(w http.ResponseWriter, r *http.Request) {
 	absolute := parseIntDefault(pathVar(r, "index"), -1)
 	relative := -1
 	for i, track := range status.SubtitleTracks {
-		idx := track.AbsoluteIndex
-		if idx <= 0 {
-			idx = track.Index
-		}
+		idx := subtitleTrackIndex(track)
 		if idx == absolute {
 			relative = i
 			break

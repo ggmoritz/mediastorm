@@ -113,7 +113,9 @@ func TestProgressUsesProbedDuration(t *testing.T) {
 		t.Fatalf("runtime = %v, want the probed 1320 s", rt)
 	}
 	h.do(http.MethodPost, "/Sessions/Playing/Progress", tok, map[string]any{"ItemId": item, "PlaySessionId": info.PlaySessionID, "PositionTicks": int64(660) * ticksPerSecond})
-	h.do(http.MethodPost, "/Sessions/Playing/Progress", tok, map[string]any{"ItemId": item, "PositionTicks": int64(990) * ticksPerSecond})
+	// A report for a play session the bridge no longer knows (an id from
+	// before a restart) uses the remembered duration.
+	h.do(http.MethodPost, "/Sessions/Playing/Progress", tok, map[string]any{"ItemId": item, "PlaySessionId": "expired-session", "PositionTicks": int64(990) * ticksPerSecond})
 	if got := h.history.progress; len(got) != 2 || got[0].Duration != 1320 || got[0].PercentWatched != 50 || got[1].Duration != 1320 {
 		t.Fatalf("progress = %+v, want duration 1320 with and without the play session", got)
 	}

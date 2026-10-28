@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,11 @@ type playSession struct {
 	segmentsDone      bool
 	state             *playState // last playback report; nil until playback starts
 	reissued          time.Time  // last time PlaybackInfo handed this session out again
+	// serverSubtitle is the default subtitle PlaybackInfo handed out (nil
+	// when the client asked for one); subtitlePicked turns true once the
+	// client reports a different one. Only picks are remembered per series.
+	serverSubtitle *int
+	subtitlePicked bool
 }
 
 // playState is the client's last playback report, for GET /Sessions.
@@ -144,6 +150,30 @@ func (ps *playSessions) latestForItem(profileID, itemID, deviceID string) (*play
 	for _, sess := range ps.byID {
 		if sess.ProfileID == profileID && sess.ItemID == itemID && sess.DeviceID == deviceID && (best == nil || sess.created.After(best.created)) {
 			best = sess
+		}
+	}
+	return best, best != nil
+}
+
+// forReport finds the play session a report without PlaySessionId belongs
+// to: the newest one of the profile on that device for the item, preferring
+// the reported media source (Auto and the versions have their own sessions).
+// Plezy leaves the id out; Jellyfin itself matches such reports by device
+// and item.
+func (ps *playSessions) forReport(profileID, deviceID, itemID, mediaSourceID string) (*playSession, bool) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	mediaSourceID = normalizeID(mediaSourceID)
+	var best *playSession
+	bestMatches := false
+	for _, sess := range ps.byID {
+		if sess.ProfileID != profileID || sess.DeviceID != deviceID || sess.ItemID != itemID {
+			continue
+		}
+		matches := mediaSourceID != "" && normalizeID(sess.MediaSourceID) == mediaSourceID
+		switch {
+		case best == nil, matches && !bestMatches, matches == bestMatches && sess.created.After(best.created):
+			best, bestMatches = sess, matches
 		}
 	}
 	return best, best != nil
@@ -538,15 +568,32 @@ func (s *Server) vodMediaSource(r *http.Request, p *principal, sess *playSession
 
 	audio := -1
 	subtitle := -1
+	audioFrom, subtitleFrom := "mediastorm", "mediastorm"
 	if status != nil {
 		audio = status.SelectedAudioTrack
 		subtitle = status.SelectedSubtitleTrack
 	}
+	// The subtitle picked in the series' previous episode wins over
+	// mediastorm's own default (Jellyfin's RememberSubtitleSelections).
+	if remembered, ok := s.rememberedSubtitle(p.Profile.ID, sess.Ref, status); ok {
+		subtitle, subtitleFrom = remembered, "remembered"
+	}
 	if req.AudioStreamIndex != nil && *req.AudioStreamIndex >= 0 {
-		audio = *req.AudioStreamIndex
+		audio, audioFrom = *req.AudioStreamIndex, "request"
 	}
 	if req.SubtitleStreamIndex != nil {
-		subtitle = *req.SubtitleStreamIndex
+		subtitle, subtitleFrom = *req.SubtitleStreamIndex, "request"
+	}
+	sess.mu.Lock()
+	if subtitleFrom == "request" {
+		sess.subtitlePicked = true // the client chose it: a pick to remember
+	} else {
+		sess.serverSubtitle = intPtr(subtitle)
+	}
+	sess.mu.Unlock()
+	if trackLogs {
+		log.Printf("[jellyfin-bridge] tracks %s (%s): default audio=%s (%s) subtitle=%s (%s); available %s",
+			sess.ItemID, p.Client.Client, describeTrack(status, audio, true), audioFrom, describeTrack(status, subtitle, false), subtitleFrom, describeTracks(status))
 	}
 	var start int64
 	if req.StartTimeTicks != nil && *req.StartTimeTicks > 0 {
@@ -677,10 +724,7 @@ func mediaStreamsFromStatus(status *playback.PrequeueStatusResponse) []dto.Media
 		})
 	}
 	for _, sub := range status.SubtitleTracks {
-		idx := sub.AbsoluteIndex
-		if idx <= 0 {
-			idx = sub.Index
-		}
+		idx := subtitleTrackIndex(sub)
 		streams = append(streams, dto.MediaStream{
 			Type:                 "Subtitle",
 			Index:                idx,
@@ -754,6 +798,9 @@ func (s *Server) handlePlaybackReport(kind string) http.HandlerFunc {
 			}
 		}
 		sess, _ := s.plays.get(rep.PlaySessionID)
+		if sess == nil && rep.PlaySessionID == "" && rep.ItemID != "" {
+			sess, _ = s.plays.forReport(p.Profile.ID, p.Client.DeviceID, normalizeID(rep.ItemID), rep.MediaSourceID)
+		}
 		if sess != nil && sess.ProfileID != p.Profile.ID {
 			sess = nil
 		}
@@ -783,8 +830,23 @@ func (s *Server) handlePlaybackReport(kind string) http.HandlerFunc {
 				s.notifyUserData(r.Context(), p, normalizeID(rep.ItemID))
 			}
 		}
+		if sess == nil && kind == "start" && trackLogs {
+			log.Printf("[jellyfin-bridge] report start %s (%s): unknown play session %q; track picks are not learned", rep.ItemID, p.Client.Client, rep.PlaySessionID)
+		}
 		if sess != nil && kind != "stopped" {
+			changed := trackLogs && sess.tracksChanged(rep)
 			sess.recordState(rep)
+			outcome := ""
+			if rep.SubtitleIndex != nil {
+				outcome = s.rememberSubtitle(p, sess, *rep.SubtitleIndex)
+			}
+			if changed {
+				sess.mu.Lock()
+				status := sess.status
+				sess.mu.Unlock()
+				log.Printf("[jellyfin-bridge] report %s %s (%s): audio=%s subtitle=%s; subtitle memory: %s",
+					kind, sess.ItemID, p.Client.Client, describeReported(status, rep.AudioIndex, true), describeReported(status, rep.SubtitleIndex, false), outcome)
+			}
 			s.keepAliveHLS(r.Context(), p, sess)
 			if kind == "start" && sess.Ref.Kind == refEpisode {
 				go s.prefetchNextEpisode(p, sess.ItemID)
@@ -805,6 +867,88 @@ func (sess *playSession) playing() bool {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	return sess.state != nil && time.Since(sess.state.At) < playingReportWindow
+}
+
+// trackLogs turns on the per-playback track diagnostics (the defaults each
+// PlaybackInfo hands out and the picks clients report): set
+// STRMR_JELLYFIN_TRACK_LOGS=1 when a client loses audio or subtitle picks.
+var trackLogs = func() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("STRMR_JELLYFIN_TRACK_LOGS")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}()
+
+// tracksChanged reports whether a report's track picks differ from the last
+// recorded ones (or are the first), so track diagnostics are logged once per
+// change rather than every few seconds.
+func (sess *playSession) tracksChanged(rep playbackReport) bool {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.state == nil {
+		return true
+	}
+	differs := func(old, cur *int) bool { return cur != nil && (old == nil || *old != *cur) }
+	return differs(sess.state.Audio, rep.AudioIndex) || differs(sess.state.Subtitle, rep.SubtitleIndex)
+}
+
+// describeTrack names a track index of the stream for the logs:
+// "2 ger AC3", "-1 off" or "5 (not in the stream)".
+func describeTrack(status *playback.PrequeueStatusResponse, index int, audio bool) string {
+	if index < 0 {
+		return strconv.Itoa(index) + " off"
+	}
+	if status != nil {
+		if audio {
+			for _, a := range status.AudioTracks {
+				if a.Index == index {
+					return fmt.Sprintf("%d %s %s", index, orUnd(a.Language), a.Codec)
+				}
+			}
+		} else {
+			for _, sub := range status.SubtitleTracks {
+				if subtitleTrackIndex(sub) == index {
+					forced := ""
+					if sub.Forced {
+						forced = " forced"
+					}
+					return fmt.Sprintf("%d %s%s", index, orUnd(sub.Language), forced)
+				}
+			}
+		}
+	}
+	return strconv.Itoa(index) + " (not in the stream)"
+}
+
+func describeReported(status *playback.PrequeueStatusResponse, index *int, audio bool) string {
+	if index == nil {
+		return "-"
+	}
+	return describeTrack(status, *index, audio)
+}
+
+// describeTracks lists a stream's audio and subtitle tracks for the logs.
+func describeTracks(status *playback.PrequeueStatusResponse) string {
+	if status == nil {
+		return "(no stream yet)"
+	}
+	var audio, subs []string
+	for _, a := range status.AudioTracks {
+		audio = append(audio, fmt.Sprintf("%d:%s", a.Index, orUnd(a.Language)))
+	}
+	for _, sub := range status.SubtitleTracks {
+		entry := fmt.Sprintf("%d:%s", subtitleTrackIndex(sub), orUnd(sub.Language))
+		if sub.Forced {
+			entry += "(forced)"
+		}
+		subs = append(subs, entry)
+	}
+	return "audio [" + strings.Join(audio, " ") + "] subtitles [" + strings.Join(subs, " ") + "]"
+}
+
+func orUnd(lang string) string {
+	if strings.TrimSpace(lang) == "" {
+		return "und"
+	}
+	return lang
 }
 
 // recordState keeps the client's latest report. Progress reports repeat the

@@ -18,6 +18,8 @@ import (
 // home-screen sections, sort orders and the web client's "usersettings").
 // They are opaque to the bridge: stored and returned verbatim per profile.
 type prefsStore struct {
+	name  string // for log messages
+	limit int    // documents per profile
 	mu    sync.Mutex
 	path  string
 	data  map[string]json.RawMessage
@@ -27,15 +29,21 @@ type prefsStore struct {
 }
 
 func newPrefsStore(path string) *prefsStore {
-	p := &prefsStore{path: path, data: map[string]json.RawMessage{}, stop: make(chan struct{}), done: make(chan struct{})}
+	return newNamedPrefsStore(path, "display prefs", maxPrefsPerProfile)
+}
+
+// newNamedPrefsStore is a prefsStore for other per-profile documents (such as
+// remembered subtitle picks), with its own name in the log and its own limit.
+func newNamedPrefsStore(path, name string, limit int) *prefsStore {
+	p := &prefsStore{name: name, limit: limit, path: path, data: map[string]json.RawMessage{}, stop: make(chan struct{}), done: make(chan struct{})}
 	if path != "" {
 		if raw, err := os.ReadFile(path); err == nil {
 			if err := json.Unmarshal(raw, &p.data); err != nil {
-				log.Printf("[jellyfin-bridge] display prefs load failed: %v", err)
+				log.Printf("[jellyfin-bridge] %s load failed: %v", p.name, err)
 				p.data = map[string]json.RawMessage{}
 			}
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			log.Printf("[jellyfin-bridge] display prefs read failed: %v", err)
+			log.Printf("[jellyfin-bridge] %s read failed: %v", p.name, err)
 		}
 	}
 	go p.loop()
@@ -68,7 +76,7 @@ func (p *prefsStore) set(key string, value json.RawMessage) bool {
 				count++
 			}
 		}
-		if count >= maxPrefsPerProfile {
+		if count >= p.limit {
 			return false
 		}
 	}
@@ -99,7 +107,7 @@ func (p *prefsStore) flush() {
 		}
 	}
 	if err != nil {
-		log.Printf("[jellyfin-bridge] display prefs write: %v", err)
+		log.Printf("[jellyfin-bridge] %s write: %v", p.name, err)
 		p.mu.Lock()
 		p.dirty = true // retry on the next tick
 		p.mu.Unlock()
