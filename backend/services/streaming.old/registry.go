@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -105,7 +106,8 @@ func (r *Registry) Register(ctx context.Context, fileName string, nzbBytes []byt
 	}
 
 	relativePath := filepath.Join(id, safeName)
-	publicPath := filepath.Join("streams", relativePath)
+	// The public path is slash-separated on every platform.
+	publicPath := path.Join("streams", id, safeName)
 	streamDir := filepath.Join(r.root, id)
 
 	nzbFileName := sanitizeFileName(fileName)

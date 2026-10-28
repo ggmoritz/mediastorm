@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -90,7 +91,22 @@ func (c *fileCache) set(key string, v any) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return replaceFile(tmp, path)
+}
+
+// replaceFile renames tmp over path. On Windows a rename onto a file that
+// another writer is replacing or a reader has open fails with access denied
+// for a moment, so it is retried briefly there.
+func replaceFile(tmp, path string) error {
+	err := os.Rename(tmp, path)
+	if runtime.GOOS != "windows" {
+		return err
+	}
+	for delay := time.Millisecond; err != nil && delay <= 64*time.Millisecond; delay *= 2 {
+		time.Sleep(delay)
+		err = os.Rename(tmp, path)
+	}
+	return err
 }
 
 // clear removes all cached metadata files from the cache directory.

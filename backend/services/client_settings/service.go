@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -324,17 +323,13 @@ func (s *Service) load() error {
 		return nil
 	}
 
-	file, err := os.Open(s.path)
+	// Read the whole file and release it before a migration rewrites it:
+	// Windows cannot rename over a file that is still open.
+	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		s.settings = make(map[string]models.ClientFilterSettings)
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("open client settings: %w", err)
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(file)
 	if err != nil {
 		return fmt.Errorf("read client settings: %w", err)
 	}

@@ -1337,11 +1337,13 @@ func (s *Service) load() error {
 	if err != nil {
 		return fmt.Errorf("open users file: %w", err)
 	}
-	defer file.Close()
-
 	dec := json.NewDecoder(file)
 	var stored []models.User
-	if err := dec.Decode(&stored); err != nil {
+	err = dec.Decode(&stored)
+	// Close before a migration below rewrites the file: Windows cannot
+	// rename over a file that is still open.
+	file.Close()
+	if err != nil {
 		return fmt.Errorf("decode users: %w", err)
 	}
 
