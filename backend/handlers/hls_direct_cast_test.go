@@ -10,7 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,7 +65,7 @@ func TestStartHLSSessionDirectCastWithoutProbeFallsBackToStableTimeline(t *testi
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/definitely-missing-ffprobe", t.TempDir(), directCastTestProvider{directURL: inputPath})
+			handler := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), "/definitely-missing-ffprobe", t.TempDir(), directCastTestProvider{directURL: inputPath})
 			defer handler.hlsManager.Shutdown()
 
 			rec := httptest.NewRecorder()
@@ -92,7 +94,7 @@ func TestStartHLSSessionCompatibilityCastRemainsStableTimeline(t *testing.T) {
 		t.Fatalf("write input fixture: %v", err)
 	}
 
-	handler := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/definitely-missing-ffprobe", t.TempDir(), directCastTestProvider{directURL: inputPath})
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), "/definitely-missing-ffprobe", t.TempDir(), directCastTestProvider{directURL: inputPath})
 	defer handler.hlsManager.Shutdown()
 
 	query := url.Values{
@@ -341,6 +343,9 @@ func TestCompatibilityCastHDRTranscodingArgsKeepLegacyStableMPEGTSPath(t *testin
 
 func runCastArgPlanTest(t *testing.T, session *HLSSession, forceAAC bool) ([]string, string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ffmpeg shell script is POSIX-only")
+	}
 
 	capturePath := filepath.Join(t.TempDir(), "ffmpeg-args.txt")
 	ffmpegPath := filepath.Join(t.TempDir(), "fake-ffmpeg.sh")
@@ -370,7 +375,9 @@ func runCastArgPlanTest(t *testing.T, session *HLSSession, forceAAC bool) ([]str
 	session.EarliestBufferedSegment = -1
 	session.FinalSegmentCount = -1
 
-	var logBuf strings.Builder
+	// Sessions started by earlier tests may still be logging from their
+	// transcoding goroutines, so the capture must be safe for concurrent use.
+	var logBuf lockedLogBuffer
 	originalLogOutput := log.Writer()
 	log.SetOutput(&logBuf)
 	t.Cleanup(func() { log.SetOutput(originalLogOutput) })
@@ -388,6 +395,25 @@ func runCastArgPlanTest(t *testing.T, session *HLSSession, forceAAC bool) ([]str
 		args = nil
 	}
 	return args, logBuf.String()
+}
+
+// lockedLogBuffer is a strings.Builder that can be written and read from
+// different goroutines.
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func argPair(args []string, key, value string) bool {

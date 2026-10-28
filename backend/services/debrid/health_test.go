@@ -8,6 +8,7 @@ import (
 	"novastream/config"
 	"novastream/models"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -71,6 +72,9 @@ func TestPreResolvedPlaybackReturnsReusableFullProbe(t *testing.T) {
 }
 
 func TestPreResolvedHealthUsesSingleProbeForValidationAndTracks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ffprobe shell script is POSIX-only")
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodHead {
 			t.Fatalf("unexpected method: %s", r.Method)

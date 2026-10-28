@@ -156,7 +156,7 @@ func TestStartLiveHDHomeRunSessionAllowsTunerStreamPort(t *testing.T) {
 	} {
 		t.Run(tc.format+"/"+tc.target, func(t *testing.T) {
 			// Stub FFmpeg: this checks session authorization, not tuner playback.
-			h := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+			h := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 			t.Cleanup(h.hlsManager.Shutdown)
 			h.SetConfigManager(fakeLiveUsageConfigProvider{settings: config.Settings{
 				Live: config.LiveSettings{Mode: "m3u", PlaylistURL: "http://192.168.1.100/lineup.m3u", StreamFormat: tc.format, ProxyURL: proxy.URL},
@@ -189,7 +189,7 @@ func TestStartLiveHDHomeRunSessionAllowsTunerStreamPort(t *testing.T) {
 }
 
 func TestStartLiveOrdinaryDirectCastRetainsDirectMode(t *testing.T) {
-	h := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+	h := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 	t.Cleanup(h.hlsManager.Shutdown)
 	h.SetConfigManager(fakeLiveUsageConfigProvider{settings: config.Settings{
 		Live: config.LiveSettings{Mode: "m3u", PlaylistURL: "https://93.184.216.34/channels.m3u", StreamFormat: "direct"},

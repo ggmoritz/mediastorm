@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,11 +129,27 @@ func TestSimilarityScore(t *testing.T) {
 }
 
 type fakeLocalMediaRepo struct {
+	// mu guards the fields: StartScan works in a background goroutine.
+	mu      sync.Mutex
 	library *models.LocalMediaLibrary
 	items   map[string]*models.LocalMediaItem
 }
 
+func (f *fakeLocalMediaRepo) scanStatus() models.LocalMediaScanStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.library.LastScanStatus
+}
+
+func (f *fakeLocalMediaRepo) itemCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.items)
+}
+
 func (f *fakeLocalMediaRepo) ListLibraries(ctx context.Context) ([]models.LocalMediaLibrary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.library == nil {
 		return nil, nil
 	}
@@ -140,6 +157,8 @@ func (f *fakeLocalMediaRepo) ListLibraries(ctx context.Context) ([]models.LocalM
 }
 
 func (f *fakeLocalMediaRepo) GetLibrary(ctx context.Context, id string) (*models.LocalMediaLibrary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.library == nil || f.library.ID != id {
 		return nil, nil
 	}
@@ -148,18 +167,24 @@ func (f *fakeLocalMediaRepo) GetLibrary(ctx context.Context, id string) (*models
 }
 
 func (f *fakeLocalMediaRepo) CreateLibrary(ctx context.Context, library *models.LocalMediaLibrary) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	copy := *library
 	f.library = &copy
 	return nil
 }
 
 func (f *fakeLocalMediaRepo) UpdateLibrary(ctx context.Context, library *models.LocalMediaLibrary) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	copy := *library
 	f.library = &copy
 	return nil
 }
 
 func (f *fakeLocalMediaRepo) DeleteLibrary(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.library != nil && f.library.ID == id {
 		f.library = nil
 	}
@@ -167,6 +192,8 @@ func (f *fakeLocalMediaRepo) DeleteLibrary(ctx context.Context, id string) error
 }
 
 func (f *fakeLocalMediaRepo) ListItemsByLibrary(ctx context.Context, libraryID string, query models.LocalMediaItemListQuery) (*models.LocalMediaItemListResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var items []models.LocalMediaItem
 	for _, item := range f.items {
 		if item.LibraryID == libraryID {
@@ -182,6 +209,8 @@ func (f *fakeLocalMediaRepo) ListItemsByLibrary(ctx context.Context, libraryID s
 }
 
 func (f *fakeLocalMediaRepo) ListAllItemsByLibrary(ctx context.Context, libraryID string) ([]models.LocalMediaItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var items []models.LocalMediaItem
 	for _, item := range f.items {
 		if item.LibraryID == libraryID {
@@ -192,6 +221,8 @@ func (f *fakeLocalMediaRepo) ListAllItemsByLibrary(ctx context.Context, libraryI
 }
 
 func (f *fakeLocalMediaRepo) UpsertItem(ctx context.Context, item *models.LocalMediaItem) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.items == nil {
 		f.items = make(map[string]*models.LocalMediaItem)
 	}
@@ -201,6 +232,8 @@ func (f *fakeLocalMediaRepo) UpsertItem(ctx context.Context, item *models.LocalM
 }
 
 func (f *fakeLocalMediaRepo) GetItem(ctx context.Context, id string) (*models.LocalMediaItem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, item := range f.items {
 		if item.ID == id {
 			copy := *item
@@ -211,6 +244,8 @@ func (f *fakeLocalMediaRepo) GetItem(ctx context.Context, id string) (*models.Lo
 }
 
 func (f *fakeLocalMediaRepo) DeleteItemsNotSeenInScan(ctx context.Context, libraryID, scanID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for path, item := range f.items {
 		if item.LibraryID != libraryID {
 			continue
@@ -223,6 +258,8 @@ func (f *fakeLocalMediaRepo) DeleteItemsNotSeenInScan(ctx context.Context, libra
 }
 
 func (f *fakeLocalMediaRepo) DeleteItem(ctx context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for path, item := range f.items {
 		if item.ID == id {
 			delete(f.items, path)
@@ -371,23 +408,23 @@ func TestStartScanAcceptsBackgroundScanWithoutBlocking(t *testing.T) {
 	if summary.Status != string(models.LocalMediaScanStatusScanning) {
 		t.Fatalf("summary.Status = %q, want %q", summary.Status, models.LocalMediaScanStatusScanning)
 	}
-	if repo.library.LastScanStatus != models.LocalMediaScanStatusScanning &&
-		repo.library.LastScanStatus != models.LocalMediaScanStatusComplete {
-		t.Fatalf("LastScanStatus immediately after StartScan = %v, want scanning or complete", repo.library.LastScanStatus)
+	if repo.scanStatus() != models.LocalMediaScanStatusScanning &&
+		repo.scanStatus() != models.LocalMediaScanStatusComplete {
+		t.Fatalf("LastScanStatus immediately after StartScan = %v, want scanning or complete", repo.scanStatus())
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if repo.library.LastScanStatus == models.LocalMediaScanStatusComplete {
+		if repo.scanStatus() == models.LocalMediaScanStatusComplete {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if repo.library.LastScanStatus != models.LocalMediaScanStatusComplete {
-		t.Fatalf("LastScanStatus = %v after wait, want %v", repo.library.LastScanStatus, models.LocalMediaScanStatusComplete)
+	if repo.scanStatus() != models.LocalMediaScanStatusComplete {
+		t.Fatalf("LastScanStatus = %v after wait, want %v", repo.scanStatus(), models.LocalMediaScanStatusComplete)
 	}
-	if len(repo.items) != 1 {
-		t.Fatalf("items stored = %d, want 1", len(repo.items))
+	if repo.itemCount() != 1 {
+		t.Fatalf("items stored = %d, want 1", repo.itemCount())
 	}
 }
 

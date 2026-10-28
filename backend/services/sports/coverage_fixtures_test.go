@@ -21,11 +21,8 @@ func TestEveryActivatedCoverageFixtureNormalizes(t *testing.T) {
 			} `json:"default"`
 		} `json:"evidence"`
 	}
-	raw, err := os.ReadFile("../../../docs/sports-coverage/validated-catalog.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = json.Unmarshal(raw, &evidence); err != nil {
+	raw := readCoverageEvidence(t, "../../../docs/sports-coverage/validated-catalog.json")
+	if err := json.Unmarshal(raw, &evidence); err != nil {
 		t.Fatal(err)
 	}
 	verifiedPaths := map[string]string{}

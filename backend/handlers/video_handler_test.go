@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -1364,6 +1365,9 @@ func (p *testStreamProvider) Stream(ctx context.Context, req streaming.Request) 
 }
 
 func TestProbeVideoRemoteLibraryFallsBackWhenHeadIsUnsupported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
 	ffprobePath := filepath.Join(t.TempDir(), "ffprobe")
 	ffprobeScript := `#!/bin/sh
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},{"index":1,"codec_type":"audio","codec_name":"eac3","channels":6,"channel_layout":"5.1","tags":{"language":"eng"}}],"format":{"duration":"60.0","size":"1234","format_name":"matroska"}}'
@@ -1414,6 +1418,9 @@ func TestProbeVideoStillReturnsNotFoundForNonLibraryPath(t *testing.T) {
 }
 
 func TestProbeVideoRemoteLibraryReturnsNotFoundWhenGetAlsoFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
 	ffprobePath := filepath.Join(t.TempDir(), "ffprobe")
 	if err := os.WriteFile(ffprobePath, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatalf("write fake ffprobe: %v", err)
