@@ -105,7 +105,7 @@ func TestHDHomeRunChannelDoesNotAuthorizeGenericVideo(t *testing.T) {
 }
 
 func TestHDHomeRunSessionRejectsForgedChannelBeforeCreatingSession(t *testing.T) {
-	h := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+	h := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 	defer h.hlsManager.Shutdown()
 	h.SetConfigManager(staticSecurityConfigProvider{hdHomeRunTestSettings()})
 	h.SetLiveChannelProvider(staticLiveChannelProvider{channels: []LiveChannel{{ID: "channel-5", SourceID: "tuner", URL: "http://192.168.1.100:5004/auto/v5.1"}}})

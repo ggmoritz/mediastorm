@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,6 +108,9 @@ func TestCompileRecordingRegexCaseSensitivity(t *testing.T) {
 }
 
 func TestStartRecordingRetriesTransientFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
 	t.Setenv("ATTEMPT_FILE", filepath.Join(t.TempDir(), "attempts.txt"))
 	script := writeFakeFFmpeg(t, `#!/bin/sh
 count=0
@@ -160,6 +164,9 @@ exit 0
 }
 
 func TestStartRecordingFailsAfterRetryWindowExpires(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
 	t.Setenv("ATTEMPT_FILE", filepath.Join(t.TempDir(), "attempts.txt"))
 	script := writeFakeFFmpeg(t, `#!/bin/sh
 count=0
@@ -214,6 +221,9 @@ exit 1
 }
 
 func TestCancelledRecordingKeepsPlayableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
 	script := writeFakeFFmpeg(t, `#!/bin/sh
 printf 'recorded-media-data'
 exec sleep 10
@@ -343,6 +353,9 @@ func newTestRecording(endAt time.Time) models.Recording {
 
 func writeFakeFFmpeg(t *testing.T, script string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake ffmpeg shell script is POSIX-only")
+	}
 	path := filepath.Join(t.TempDir(), "fake-ffmpeg.sh")
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)

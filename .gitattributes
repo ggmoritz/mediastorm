@@ -1,0 +1,6 @@
+# Embedded web assets are served and tested byte for byte (vendored
+# checksums, multi-line markers), so never convert their line endings.
+backend/handlers/static/** -text
+backend/handlers/admin_templates/** -text
+backend/handlers/account_templates/** -text
+backend/handlers/web_templates/** -text

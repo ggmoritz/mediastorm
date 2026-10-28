@@ -142,7 +142,7 @@ func TestGetLiveUsageUsesSelectedLiveSourceLimit(t *testing.T) {
 }
 
 func TestStartLiveHLSSessionDirectIncludesProfileParams(t *testing.T) {
-	handler := NewVideoHandlerWithProvider(true, "/bin/echo", "/bin/echo", t.TempDir(), nil)
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "echo"), stubBinary(t, "echo"), t.TempDir(), nil)
 	handler.SetConfigManager(fakeLiveUsageConfigProvider{
 		settings: config.Settings{
 			Live: config.LiveSettings{
@@ -232,7 +232,7 @@ func TestResolveLiveStreamTargetUsesPerSourceStreamFormat(t *testing.T) {
 }
 
 func TestStartLiveHLSSessionDirectForcesHLSWhenRequested(t *testing.T) {
-	handler := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 	handler.SetConfigManager(fakeLiveUsageConfigProvider{
 		settings: config.Settings{
 			Live: config.LiveSettings{
@@ -286,7 +286,7 @@ func TestStartLiveHLSSessionDirectForcesHLSWhenRequested(t *testing.T) {
 }
 
 func TestStartLiveHLSSessionRejectsUnconfiguredPrivateURL(t *testing.T) {
-	handler := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 	handler.SetConfigManager(fakeLiveUsageConfigProvider{settings: config.Settings{
 		Live: config.LiveSettings{Mode: "m3u", PlaylistURL: "https://example.com/live.m3u"},
 	}})
@@ -311,7 +311,7 @@ func TestStartLiveHLSSessionResolvesStremioStreamResource(t *testing.T) {
 	}))
 	defer stremio.Close()
 
-	handler := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 	handler.SetConfigManager(fakeLiveUsageConfigProvider{
 		settings: config.Settings{
 			Live: config.LiveSettings{
@@ -375,7 +375,7 @@ func TestStartLiveHLSSessionRejectsStremioSubscriptionPlaceholder(t *testing.T) 
 	}))
 	defer stremio.Close()
 
-	handler := NewVideoHandlerWithProvider(true, "/usr/bin/true", "/usr/bin/true", t.TempDir(), nil)
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "true"), stubBinary(t, "true"), t.TempDir(), nil)
 	handler.SetConfigManager(fakeLiveUsageConfigProvider{
 		settings: config.Settings{
 			Live: config.LiveSettings{

@@ -19,11 +19,8 @@ func TestActivatedOptionalProviderFixtures(t *testing.T) {
 			RequestedEventID string `json:"requestedEventID"`
 		} `json:"summary"`
 	}
-	raw, err := os.ReadFile("../../../docs/sports-coverage/evidence/optional-capabilities.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = json.Unmarshal(raw, &evidence); err != nil {
+	raw := readCoverageEvidence(t, "../../../docs/sports-coverage/evidence/optional-capabilities.json")
+	if err := json.Unmarshal(raw, &evidence); err != nil {
 		t.Fatal(err)
 	}
 	events := map[string]string{}

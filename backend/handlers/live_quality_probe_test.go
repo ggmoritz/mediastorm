@@ -171,7 +171,7 @@ func TestLiveQualityCancellationReleasesConnection(t *testing.T) {
 	}
 }
 func TestLiveQualityRejectsNonHTTPAndRedactsProbeErrors(t *testing.T) {
-	h := NewVideoHandlerWithProvider(false, "", "/bin/false", t.TempDir(), nil)
+	h := NewVideoHandlerWithProvider(false, "", stubBinary(t, "false"), t.TempDir(), nil)
 	rec := httptest.NewRecorder()
 	h.ProbeLiveQuality(rec, httptest.NewRequest("POST", "/video/live/quality", strings.NewReader(`{"url":"file:///etc/passwd"}`)))
 	if rec.Code != 400 {
@@ -195,7 +195,7 @@ func TestLiveQualityRejectsNonHTTPAndRedactsProbeErrors(t *testing.T) {
 }
 
 func TestLiveQualityRequiresBackendIssuedChannelIdentity(t *testing.T) {
-	h := NewVideoHandlerWithProvider(false, "", "/bin/false", t.TempDir(), nil)
+	h := NewVideoHandlerWithProvider(false, "", stubBinary(t, "false"), t.TempDir(), nil)
 	h.SetLiveChannelProvider(staticLiveChannelProvider{channels: []LiveChannel{{ID: "known", SourceID: "source", URL: "https://provider.example/known.ts"}}})
 
 	for _, body := range []string{

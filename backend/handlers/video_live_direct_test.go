@@ -123,7 +123,7 @@ func TestStalkerDirectResponseDoesNotExposePortalSecrets(t *testing.T) {
 	}))
 	defer portal.Close()
 
-	handler := NewVideoHandlerWithProvider(true, "/bin/echo", "/bin/echo", t.TempDir(), nil)
+	handler := NewVideoHandlerWithProvider(true, stubBinary(t, "echo"), stubBinary(t, "echo"), t.TempDir(), nil)
 	handler.SetConfigManager(fakeLiveUsageConfigProvider{settings: stalkerDirectTestSettings(portal.URL)})
 	handler.SetUserSettingsService(fakeLiveUsageUserSettingsProvider{settings: map[string]*models.UserSettings{}})
 	req := httptest.NewRequest(http.MethodGet, "/live/hls/start?url="+url.QueryEscape(portal.URL+"/stalker_portal/c/")+"&channelId=12&target=native", nil)

@@ -3537,14 +3537,14 @@ func TestFilterReleasedDailyTrendingMoviesRequiresReleasedHomeWindow(t *testing.
 }
 
 func TestGetTopTenUsesCachedTMDBDailyCandidates(t *testing.T) {
-	var movieRequests, tvRequests, imageRequests int
+	var movieRequests, tvRequests, imageRequests atomic.Int64
 	httpc := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(req.URL.Path, "/release_dates") {
 			body := `{"results":[{"iso_3166_1":"US","release_dates":[{"type":4,"release_date":"2020-01-02T00:00:00Z"}]}]}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		}
 		if strings.HasSuffix(req.URL.Path, "/images") {
-			imageRequests++
+			imageRequests.Add(1)
 			body := `{"backdrops":[{"file_path":"/primary.jpg","vote_average":9},{"file_path":"/alternate-1.jpg","vote_average":8},{"file_path":"/alternate-2.jpg","vote_average":7}]}`
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 		}
@@ -3558,9 +3558,9 @@ func TestGetTopTenUsesCachedTMDBDailyCandidates(t *testing.T) {
 			mediaType = "tv"
 			name = "Show"
 			dateField = "first_air_date"
-			tvRequests++
+			tvRequests.Add(1)
 		} else {
-			movieRequests++
+			movieRequests.Add(1)
 		}
 		results := make([]map[string]any, 20)
 		for i := range results {
@@ -3600,11 +3600,11 @@ func TestGetTopTenUsesCachedTMDBDailyCandidates(t *testing.T) {
 			}
 		}
 	}
-	if movieRequests != 1 || tvRequests != 1 {
-		t.Fatalf("TMDB requests = movies %d tv %d, want one request per chart after cache hit", movieRequests, tvRequests)
+	if movieRequests.Load() != 1 || tvRequests.Load() != 1 {
+		t.Fatalf("TMDB requests = movies %d tv %d, want one request per chart after cache hit", movieRequests.Load(), tvRequests.Load())
 	}
-	if imageRequests != 40 {
-		t.Fatalf("TMDB image requests = %d, want one per cached daily candidate", imageRequests)
+	if imageRequests.Load() != 40 {
+		t.Fatalf("TMDB image requests = %d, want one per cached daily candidate", imageRequests.Load())
 	}
 }
 

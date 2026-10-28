@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1554,6 +1555,9 @@ func TestHLSManager_BuildLocalWebDAVURLFromPathSkipsRemoteMedia(t *testing.T) {
 }
 
 func TestHLSManager_ProbeRemoteMediaUsesProviderPipe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake binary shell script is POSIX-only")
+	}
 	ffprobePath := filepath.Join(t.TempDir(), "ffprobe")
 	ffprobeScript := `#!/bin/sh
 cat >/dev/null
