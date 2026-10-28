@@ -704,9 +704,13 @@ func (s *PrequeueStore) saveEntryToDB(entry *PrequeueEntry) {
 	}
 }
 
-// generateID creates a unique prequeue ID
+// prequeueIDSeq keeps IDs unique when two entries are created within one
+// clock tick (Windows timers are coarse enough for that to happen).
+var prequeueIDSeq atomic.Uint64
+
+// generateID creates a unique prequeue ID.
 func generateID() string {
-	return fmt.Sprintf("pq_%d", time.Now().UnixNano())
+	return fmt.Sprintf("pq_%d_%d", time.Now().UnixNano(), prequeueIDSeq.Add(1))
 }
 
 // titleUserKey creates a key for the secondary index
