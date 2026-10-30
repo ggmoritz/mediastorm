@@ -4398,6 +4398,7 @@ func (s *Service) tmdbSeriesDetailsFallback(ctx context.Context, req models.Seri
 
 func (s *Service) SeriesDetails(ctx context.Context, req models.SeriesDetailsQuery) (out *models.SeriesDetails, retErr error) {
 	defer func() {
+		s.repairSeasonPosters(ctx, out, req)
 		if out != nil && out.Numbering == nil {
 			models.StampEpisodeNumbering(out, fmt.Sprintf("tvdb:series:%d", out.Title.TVDBID))
 		}
@@ -5537,6 +5538,7 @@ func populateAiredDateTimeUTC(details *models.SeriesDetails) {
 // It uses a dedicated lite cache key so it can't overwrite the richer full-details cache.
 func (s *Service) SeriesDetailsLite(ctx context.Context, req models.SeriesDetailsQuery) (out *models.SeriesDetails, retErr error) {
 	defer func() {
+		s.repairSeasonPosters(ctx, out, req)
 		if out != nil && out.Numbering == nil {
 			models.StampEpisodeNumbering(out, fmt.Sprintf("tvdb:series:%d", out.Title.TVDBID))
 		}

@@ -309,7 +309,7 @@ func (s *Server) childrenOf(ctx context.Context, p *principal, u *userState, q i
 		}
 		return s.seriesSeasons(ctx, u, series)
 	case refSeason:
-		series := s.seriesRefFrom(seriesInfoFromSeasonRef(ref))
+		series := s.seriesRefFrom(s.seriesWithArtwork(seriesInfoFromSeasonRef(ref)))
 		return s.seriesEpisodes(ctx, u, series, ref.Ctx.Season)
 	case refLocalSeries:
 		g, ok := s.findLocalGroup(ctx, p, ref.Ctx.Extra, ref.Ctx.ViewKey)
@@ -380,9 +380,11 @@ func seriesInfoFromSeasonRef(ref itemRef) titleInfo {
 		Name:        name,
 		Year:        ref.Ctx.Year,
 		ExternalIDs: titleLevelIDs(ext),
-		Poster:      ref.Ctx.Poster,
-		Backdrop:    ref.Ctx.Backdrop,
-		Logo:        ref.Ctx.Logo,
+		// A child's own poster may be a season cover or episode still.
+		// Legacy refs without SeriesPoster recover it via seriesWithArtwork.
+		Poster:   ref.Ctx.SeriesPoster,
+		Backdrop: ref.Ctx.Backdrop,
+		Logo:     ref.Ctx.Logo,
 	}
 }
 
@@ -462,6 +464,9 @@ func (s *Server) seriesEpisodes(ctx context.Context, u *userState, series series
 		if season < 0 && sn.Number == 0 {
 			continue
 		}
+		// Register the actual season cover even when episodes are requested
+		// first (continue watching, recursive browsing, or a direct link).
+		s.seasonItem(nil, series, sn)
 		for _, ep := range airedEpisodes(sn.Episodes) {
 			out = append(out, s.episodeItem(u, series, episodeFromMetadata(ep)))
 		}
@@ -714,6 +719,7 @@ func (s *Server) itemByID(ctx context.Context, p *principal, u *userState, id st
 					}
 					for _, ep := range season.Episodes {
 						if ep.EpisodeNumber == ref.Ctx.Episode {
+							s.seasonItem(nil, series, season)
 							return s.episodeItem(u, series, episodeFromMetadata(ep)), true
 						}
 					}
@@ -763,8 +769,9 @@ func (s *Server) people(ctx context.Context, t titleInfo) []dto.Person {
 		if i >= 20 {
 			break
 		}
-		id := s.ids.put(refPerson, "tmdb:person:"+strconv.FormatInt(member.ID, 10), refContext{Name: member.Name, Poster: member.ProfileURL})
-		out = append(out, dto.Person{Name: member.Name, ID: id, Role: member.Character, Type: "Actor", PrimaryImageTag: imageTag(member.ProfileURL)})
+		id := s.ids.putTrusted(refPerson, "tmdb:person:"+strconv.FormatInt(member.ID, 10), refContext{Name: member.Name, Poster: member.ProfileURL})
+		ref, _ := s.ids.get(id)
+		out = append(out, dto.Person{Name: member.Name, ID: id, Role: member.Character, Type: "Actor", PrimaryImageTag: imageTag(imageURLFor(ref, "primary"))})
 	}
 	return out
 }

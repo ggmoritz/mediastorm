@@ -363,9 +363,24 @@ func (s *Server) imageFields(item *dto.BaseItemDto, poster, backdrop, logo strin
 	if backdrop != "" {
 		tags[dto.ImageThumb] = imageTag(backdrop)
 		item.BackdropImageTags = []string{imageTag(backdrop)}
+	} else {
+		item.BackdropImageTags = nil
 	}
-	if len(tags) > 0 {
-		item.ImageTags = tags
+	item.ImageTags = tags
+}
+
+func (s *Server) storedImageFields(item *dto.BaseItemDto) {
+	if ref, ok := s.ids.get(item.ID); ok {
+		s.imageFields(item, ref.Ctx.Poster, ref.Ctx.Backdrop, ref.Ctx.Logo)
+	}
+}
+
+func episodeImageFields(item *dto.BaseItemDto, ref itemRef) {
+	item.ImageTags = imageTagsFor(imageURLFor(ref, "primary"))
+	if ref.Ctx.Thumb != "" || ref.Ctx.Backdrop != "" {
+		item.PrimaryImageAspectRatio = floatPtr(16.0 / 9.0)
+	} else if ref.Ctx.Poster != "" {
+		item.PrimaryImageAspectRatio = floatPtr(2.0 / 3.0)
 	}
 }
 
@@ -377,6 +392,11 @@ func (s *Server) titleItem(u *userState, t titleInfo) dto.BaseItemDto {
 		put = s.ids.putTrusted
 	}
 	id := put(t.refKind(), src, t.context())
+	// Sparse list/history records only fill gaps in the shared index. The
+	// tags must describe what the image endpoint actually serves from it.
+	if ref, ok := s.ids.get(id); ok {
+		t.Poster, t.Backdrop, t.Logo = ref.Ctx.Poster, ref.Ctx.Backdrop, ref.Ctx.Logo
+	}
 	item := dto.BaseItemDto{
 		Name:           t.Name,
 		ServerID:       s.serverID,
@@ -477,6 +497,16 @@ type seriesRef struct {
 	Src  string
 }
 
+// Inherited tags address the parent's GUID, so use that parent's artwork.
+func (s *Server) seriesArtwork(series seriesRef) seriesRef {
+	if ref, ok := s.ids.get(series.GUID); ok {
+		series.Info.Poster = ref.Ctx.Poster
+		series.Info.Backdrop = ref.Ctx.Backdrop
+		series.Info.Logo = ref.Ctx.Logo
+	}
+	return series
+}
+
 func (s *Server) seriesRefFrom(t titleInfo) seriesRef {
 	t.ExternalIDs = titleLevelIDs(t.ExternalIDs)
 	src := t.source()
@@ -505,15 +535,26 @@ func seasonName(number int, name string) string {
 }
 
 func (s *Server) seasonItem(u *userState, series seriesRef, season models.SeriesSeason) dto.BaseItemDto {
+	series = s.seriesArtwork(series)
 	poster := series.Info.Poster
-	if season.Image != nil && season.Image.URL != "" {
+	if season.Image.IsPortraitPoster() {
 		poster = season.Image.URL
 	}
 	ctx := series.Info.context()
 	ctx.Season = season.Number
 	ctx.SeriesName = series.Info.Name
+	ctx.SeriesPoster = series.Info.Poster
 	ctx.Poster = poster
 	id := s.ids.put(refSeason, seasonSource(series.Src, season.Number), ctx)
+	stored, _ := s.ids.get(id)
+	if season.Image.IsPortraitPoster() || !(&models.Image{URL: stored.Ctx.Poster}).IsPortraitPoster() {
+		// Episodes can seed this ref with the series poster before seasons
+		// are listed. Real season metadata must replace that fallback.
+		s.ids.putTrusted(refSeason, seasonSource(series.Src, season.Number), refContext{Poster: poster})
+	}
+	if ref, ok := s.ids.get(id); ok {
+		poster = imageURLFor(ref, "primary")
+	}
 	item := dto.BaseItemDto{
 		Name:                    seasonName(season.Number, season.Name),
 		ServerID:                s.serverID,
@@ -600,9 +641,11 @@ func episodeFromReference(ref models.EpisodeReference) episodeInfo {
 }
 
 func (s *Server) episodeItem(u *userState, series seriesRef, ep episodeInfo) dto.BaseItemDto {
+	series = s.seriesArtwork(series)
 	src := episodeSource(series, ep.Season, ep.Episode)
 	ctx := series.Info.context()
 	ctx.SeriesName = series.Info.Name
+	ctx.SeriesPoster = series.Info.Poster
 	ctx.Season = ep.Season
 	ctx.Episode = ep.Episode
 	ctx.Name = ep.Name
@@ -614,23 +657,16 @@ func (s *Server) episodeItem(u *userState, series seriesRef, ep episodeInfo) dto
 	}
 	seasonID := s.ids.put(refSeason, seasonSource(series.Src, ep.Season), refContext{
 		Name: seasonName(ep.Season, ""), TitleID: series.Info.ID, ExternalIDs: series.Info.ExternalIDs,
-		SeriesName: series.Info.Name, Season: ep.Season, Poster: series.Info.Poster, Backdrop: series.Info.Backdrop,
+		SeriesName: series.Info.Name, Season: ep.Season, Poster: series.Info.Poster, SeriesPoster: series.Info.Poster, Backdrop: series.Info.Backdrop,
 	})
 	// Progress and history rows carry neither the still nor a current title
 	// ("TBA" when written before the episode aired); what an earlier
 	// listing stored for the episode fills in.
 	name := ep.Name
-	backdrop := series.Info.Backdrop
 	if stored, ok := s.ids.get(id); ok {
 		if (name == "" || placeholderName(name)) && stored.Ctx.Name != "" && !placeholderName(stored.Ctx.Name) {
 			name = stored.Ctx.Name
 		}
-		if ep.Still == "" {
-			ep.Still = stored.Ctx.Thumb
-		}
-		// The episode serves the backdrop it stored first (see imageURLFor);
-		// its tag must name that one.
-		backdrop = firstNonEmpty(stored.Ctx.Backdrop, backdrop)
 	}
 	if name == "" {
 		name = fmt.Sprintf("Episode %d", ep.Episode)
@@ -671,16 +707,8 @@ func (s *Server) episodeItem(u *userState, series seriesRef, ep episodeInfo) dto
 		runtime = int64(ep.RuntimeMinutes) * 60 * ticksPerSecond
 		item.RunTimeTicks = int64Ptr(runtime)
 	}
-	switch {
-	case ep.Still != "":
-		item.ImageTags = map[string]string{dto.ImagePrimary: imageTag(ep.Still)}
-		item.PrimaryImageAspectRatio = floatPtr(16.0 / 9.0)
-	case backdrop != "":
-		// No still known: the series backdrop stands in (served as the
-		// episode's Primary, see imageURLFor). Clients that show only an
-		// episode's own Primary on landscape cards would show none.
-		item.ImageTags = map[string]string{dto.ImagePrimary: imageTag(backdrop)}
-		item.PrimaryImageAspectRatio = floatPtr(16.0 / 9.0)
+	if ref, ok := s.ids.get(id); ok {
+		episodeImageFields(&item, ref)
 	}
 	if series.Info.Backdrop != "" {
 		item.ParentBackdropItemID = series.GUID

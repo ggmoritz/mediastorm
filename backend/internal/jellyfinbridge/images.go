@@ -101,7 +101,10 @@ func imageURLFor(ref itemRef, imageType string) string {
 	c := ref.Ctx
 	switch imageType {
 	case "primary":
-		if ref.Kind == refEpisode {
+		if ref.Kind == refSeason && !(&models.Image{URL: c.Poster}).IsPortraitPoster() {
+			return c.SeriesPoster
+		}
+		if ref.Kind == refEpisode || (ref.Kind == refLocal && c.ViewKey != "") {
 			// Without a still the series backdrop keeps the card landscape.
 			return firstNonEmpty(c.Thumb, c.Backdrop, c.Poster)
 		}
