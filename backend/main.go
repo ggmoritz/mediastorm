@@ -394,6 +394,7 @@ func main() {
 	badStreamsService := badstreams.New(filepath.Join(settings.Cache.Directory, "bad_streams.json"))
 	badStreamsHandler := handlers.NewBadStreamsHandler(badStreamsService)
 	indexerHandler.SetBadStreamsService(badStreamsService)
+	handlers.SetStreamReleaseBadStreams(badStreamsService)
 
 	playbackService := playback.NewService(cfgManager, nzbSystem, nzbSystem.MetadataReader())
 	if demoCatalog != nil {

@@ -1403,7 +1403,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 		log.Printf("[video] provider stream failed path=%q range=%q err=%v", cleanPath, rangeHeader, err)
 		if record, confirmed := h.failures.recordRecognizedFailure(cleanPath, err); confirmed {
 			log.Printf("[stream-migration] confirmed recoverable stream failure during open path=%q range=%q err=%v", cleanPath, rangeHeader, err)
-			tracker.MarkPlaybackMigrationForPath(cleanPath, streamFailureMigrationReason(record))
+			reportConfirmedStreamFailure(cleanPath, record)
 			h.invalidatePrequeuesForFailedPath(cleanPath)
 		}
 		if errors.Is(err, streaming.ErrNotFound) {
@@ -1656,7 +1656,7 @@ func (h *VideoHandler) streamViaProvider(w http.ResponseWriter, r *http.Request,
 					log.Printf("[video] SEEK ERROR: provider read error path=%q total=%d range=%q err=%v", cleanPath, total, rangeHeader, readErr)
 					if record, confirmed := h.failures.recordRecognizedFailure(cleanPath, readErr); confirmed {
 						log.Printf("[stream-migration] confirmed missing-article stream failure during read path=%q range=%q total=%d err=%v", cleanPath, rangeHeader, total, readErr)
-						tracker.MarkPlaybackMigrationForPath(cleanPath, streamFailureMigrationReason(record))
+						reportConfirmedStreamFailure(cleanPath, record)
 						h.invalidatePrequeuesForFailedPath(cleanPath)
 					}
 					return true, readErr

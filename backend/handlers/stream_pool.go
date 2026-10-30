@@ -1121,7 +1121,7 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 				log.Printf("[stream-pool] same-source reconnect exhausted: path=%q err=%v", s.path, err)
 				if s.failures != nil {
 					if record, confirmed := s.failures.recordRecognizedFailure(s.path, err); confirmed {
-						GetStreamTracker().MarkPlaybackMigrationForPath(s.path, streamFailureMigrationReason(record))
+						reportConfirmedStreamFailure(s.path, record)
 					}
 				}
 				return
@@ -1154,7 +1154,7 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 				log.Printf("[stream-pool] same-source reconnect failed: path=%q resumeAt=%d err=%v", s.path, resumeAt, openErr)
 				if s.failures != nil {
 					if record, confirmed := s.failures.recordRecognizedFailure(s.path, err); confirmed {
-						GetStreamTracker().MarkPlaybackMigrationForPath(s.path, streamFailureMigrationReason(record))
+						reportConfirmedStreamFailure(s.path, record)
 					}
 				}
 				return
@@ -1193,7 +1193,7 @@ func (s *poolSlot) backgroundReader(resp *streaming.Response) {
 				if s.failures != nil {
 					if record, confirmed := s.failures.recordRecognizedFailure(s.path, err); confirmed {
 						log.Printf("[stream-migration] confirmed recoverable stream failure in stream pool path=%q err=%v", s.path, err)
-						GetStreamTracker().MarkPlaybackMigrationForPath(s.path, streamFailureMigrationReason(record))
+						reportConfirmedStreamFailure(s.path, record)
 					}
 				}
 			}

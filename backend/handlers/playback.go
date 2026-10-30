@@ -210,6 +210,7 @@ func (h *PlaybackHandler) Resolve(w http.ResponseWriter, r *http.Request) {
 	if rejectM2TSPlaybackResolution(w, resolution) {
 		return
 	}
+	rememberStreamRelease(resolution.WebDAVPath, request.Result)
 	h.prewarmThumbnails(resolution)
 	log.Printf("[playback-handler] TIMING: resolve complete (took: %v)", time.Since(handlerStart))
 
