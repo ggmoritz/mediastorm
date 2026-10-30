@@ -64,7 +64,18 @@ func openHDHomeRunStream(ctx context.Context, rawURL, proxyURL string) (io.ReadC
 		client.CloseIdleConnections()
 		return nil, fmt.Errorf("HDHomeRun stream returned HTTP %d", response.StatusCode)
 	}
-	return hdHomeRunStreamBody{ReadCloser: response.Body, client: client}, nil
+	body := newInspectedTSBody(response.Body, hdHomeRunStreamLogLabel(rawURL))
+	return hdHomeRunStreamBody{ReadCloser: body, client: client}, nil
+}
+
+// hdHomeRunStreamLogLabel keeps the channel in log lines. The path is safe to
+// log: isHDHomeRunStreamURL only admits /auto|tunerN/vN.M or /chN tuner paths.
+func hdHomeRunStreamLogLabel(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || !isHDHomeRunStreamURL(parsed) {
+		return "stream=" + requestsecurity.URLForLog(rawURL)
+	}
+	return "tuner=" + parsed.Host + " channel=" + parsed.Path
 }
 
 type hdHomeRunStreamBody struct {

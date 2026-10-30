@@ -1563,3 +1563,61 @@ func TestStreamChannelNativeRequestPassesProviderStreamThrough(t *testing.T) {
 		t.Fatalf("upstream User-Agent = %q, want %q", sawUA, liveStreamUserAgent)
 	}
 }
+
+type fakeLiveGuideIconProvider struct {
+	fakeLiveEPGNowPlayingProvider
+	icons map[string]string
+}
+
+func (f fakeLiveGuideIconProvider) ChannelIcons(_ []string) map[string]string {
+	return f.icons
+}
+
+func TestFillLogosFromGuideKeepsPlaylistLogosAndCache(t *testing.T) {
+	cached := []LiveChannel{
+		{ID: "tuner", TvgID: "TESTTV"},
+		{ID: "branded", TvgID: "BRANDED", Logo: "https://playlist.example/branded.png"},
+		{ID: "unmatched", TvgID: "OTHER"},
+	}
+	provider := fakeLiveGuideIconProvider{icons: map[string]string{
+		"TESTTV":  "https://img.example/testtv.png",
+		"BRANDED": "https://img.example/guide-branded.png",
+	}}
+	filled := fillLogosFromGuide(cached, provider)
+	if filled[0].Logo != "https://img.example/testtv.png" {
+		t.Fatalf("tuner channel logo = %q, want guide icon", filled[0].Logo)
+	}
+	if filled[1].Logo != "https://playlist.example/branded.png" || filled[2].Logo != "" {
+		t.Fatalf("playlist logo replaced or unmatched channel filled: %+v", filled)
+	}
+	if cached[0].Logo != "" {
+		t.Fatal("cached channel list was mutated")
+	}
+	if got := fillLogosFromGuide(cached, fakeLiveEPGNowPlayingProvider{}); got[0].Logo != "" {
+		t.Fatal("provider without icons changed logos")
+	}
+}
+
+func TestGetChannelsEncodesEmptyResultAsArray(t *testing.T) {
+	playlistServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("#EXTM3U\n#EXTINF:-1,5.1 TESTTV\nhttp://stream.example/5.1\n"))
+	}))
+	defer playlistServer.Close()
+
+	mgr := config.NewManager(filepath.Join(t.TempDir(), "settings.json"))
+	// The category filter hides the ungrouped tuner channel.
+	settings := config.Settings{Live: config.LiveSettings{PlaylistURL: playlistServer.URL, Filtering: config.LiveTVFilterSettings{EnabledCategories: []string{"News"}}}}
+	if err := mgr.Save(settings); err != nil {
+		t.Fatalf("save settings: %v", err)
+	}
+	h := NewLiveHandler(playlistServer.Client(), false, "", 24, 0, 0, false, mgr, nil)
+	rec := httptest.NewRecorder()
+	h.GetChannels(rec, httptest.NewRequest(http.MethodGet, "/live/channels?offset=0&limit=50", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"channels":[]`) {
+		t.Fatalf("empty channel list not encoded as an array: %s", rec.Body.String())
+	}
+}

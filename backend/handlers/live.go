@@ -839,6 +839,9 @@ func (h *LiveHandler) proxyStreamWithHTTPClient(w http.ResponseWriter, r *http.R
 		http.Error(w, "failed to open proxied live stream", http.StatusBadGateway)
 		return
 	}
+	if hdHomeRunInput {
+		resp.Body = newInspectedTSBody(resp.Body, fmt.Sprintf("request=%d %s", requestID, hdHomeRunStreamLogLabel(targetURL.String())))
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= http.StatusBadRequest {
@@ -1656,6 +1659,38 @@ func filterLiveChannelsByText(
 		}
 	}
 	return filtered
+}
+
+// fillLogosFromGuide gives logo-less channels their guide icon. HDHomeRun's
+// lineup.m3u carries no tvg-logo; its XMLTV guide has the station logos. The
+// slice is copied first because it can share the cached channel list.
+func fillLogosFromGuide(channels []LiveChannel, epgService LiveEPGNowPlayingProvider) []LiveChannel {
+	guide, ok := epgService.(interface {
+		ChannelIcons(channelIDs []string) map[string]string
+	})
+	if !ok {
+		return channels
+	}
+	var lookupIDs []string
+	for _, channel := range channels {
+		if strings.TrimSpace(channel.Logo) == "" && strings.TrimSpace(channel.TvgID) != "" {
+			lookupIDs = append(lookupIDs, channel.TvgID)
+		}
+	}
+	if len(lookupIDs) == 0 {
+		return channels
+	}
+	icons := guide.ChannelIcons(lookupIDs)
+	if len(icons) == 0 {
+		return channels
+	}
+	filled := append([]LiveChannel(nil), channels...)
+	for i, channel := range filled {
+		if strings.TrimSpace(channel.Logo) == "" {
+			filled[i].Logo = icons[channel.TvgID]
+		}
+	}
+	return filled
 }
 
 func orderFavoriteChannelsFirst(channels []LiveChannel, favoriteIDs map[string]struct{}) []LiveChannel {
@@ -2644,6 +2679,12 @@ func (h *LiveHandler) GetChannels(w http.ResponseWriter, r *http.Request) {
 
 	// Note: StreamURL will be set by frontend based on channel.url
 	// The frontend calls buildLiveStreamUrl to create the proxied URL
+
+	pageChannels = fillLogosFromGuide(pageChannels, h.epgService)
+	if pageChannels == nil {
+		// An empty source must encode as [], not null; the native clients fail to decode null.
+		pageChannels = []LiveChannel{}
+	}
 
 	response := LiveChannelsResponse{
 		Channels:            pageChannels,

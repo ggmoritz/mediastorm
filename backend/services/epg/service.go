@@ -62,6 +62,10 @@ type Service struct {
 	// left out, and there is no partial-match fallback beyond these two indexes.
 	normalizedIDIndex   map[string]string
 	normalizedNameIndex map[string]string
+	// exactNameIndex is consulted before the normalized indexes. Normalization strips
+	// HD/SD suffixes, so a tuner's "WSIM" and "WSIM-SD" subchannels collide there and
+	// are both dropped as ambiguous, while their exact display names stay distinct.
+	exactNameIndex map[string]string
 }
 
 type epgXMLTVSource struct {
@@ -150,16 +154,24 @@ func (s *Service) rebuildScheduleIndexLocked() {
 	}
 	nameIndex := make(map[string]string, len(s.schedule.Channels))
 	ambiguousNames := make(map[string]struct{})
+	exactIndex := make(map[string]string, len(s.schedule.Channels))
+	ambiguousExact := make(map[string]struct{})
 	for channelID, ch := range s.schedule.Channels {
 		if _, hasPrograms := s.schedule.Programs[channelID]; !hasPrograms {
 			continue
 		}
 		for _, name := range append([]string{ch.Name}, ch.Aliases...) {
 			addUnambiguousIndexKey(nameIndex, ambiguousNames, normalizeChannelID(name), channelID)
+			addUnambiguousIndexKey(exactIndex, ambiguousExact, exactChannelName(name), channelID)
 		}
 	}
 	s.normalizedIDIndex = idIndex
 	s.normalizedNameIndex = nameIndex
+	s.exactNameIndex = exactIndex
+}
+
+func exactChannelName(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func addUnambiguousIndexKey(index map[string]string, ambiguous map[string]struct{}, key, channelID string) {
@@ -1056,7 +1068,9 @@ func (s *Service) GetNowPlaying(channelIDs []string, timeOffset ...time.Duration
 			key := normalizeChannelID(channelID)
 			programs = byNormalizedID[key]
 			if len(programs) == 0 {
-				if matchedID, ok := byNormalizedName[key]; ok {
+				if matchedID, ok := s.exactNameIndex[exactChannelName(channelID)]; ok {
+					programs = s.schedule.Programs[matchedID]
+				} else if matchedID, ok := byNormalizedName[key]; ok {
 					programs = s.schedule.Programs[matchedID]
 				}
 			}
@@ -1165,6 +1179,9 @@ func (s *Service) findProgramsByChannelMatch(channelID string) []models.EPGProgr
 	if epgChannelID, ok := s.normalizedIDIndex[normalizedInput]; ok {
 		return s.schedule.Programs[epgChannelID]
 	}
+	if epgChannelID, ok := s.exactNameIndex[exactChannelName(channelID)]; ok {
+		return s.schedule.Programs[epgChannelID]
+	}
 	if epgChannelID, ok := s.normalizedNameIndex[normalizedInput]; ok {
 		return s.schedule.Programs[epgChannelID]
 	}
@@ -1226,6 +1243,33 @@ func (s *Service) GetAllChannels() map[string]models.EPGChannel {
 	result := make(map[string]models.EPGChannel, len(s.schedule.Channels))
 	for k, v := range s.schedule.Channels {
 		result[k] = v
+	}
+	return result
+}
+
+// ChannelIcons returns guide icons keyed by the requested channel IDs. Lookup
+// follows the guide's own matching (exact ID, then unambiguous normalized ID or
+// display-name alias), so tuner lineups keyed by callsign get their station logo.
+func (s *Service) ChannelIcons(channelIDs []string) map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make(map[string]string)
+	for _, channelID := range channelIDs {
+		epgChannelID := strings.ToLower(channelID)
+		if _, ok := s.schedule.Channels[epgChannelID]; !ok {
+			key := normalizeChannelID(channelID)
+			if matched, ok := s.normalizedIDIndex[key]; ok {
+				epgChannelID = matched
+			} else if matched, ok := s.exactNameIndex[exactChannelName(channelID)]; ok {
+				epgChannelID = matched
+			} else if matched, ok := s.normalizedNameIndex[key]; ok {
+				epgChannelID = matched
+			}
+		}
+		if icon := strings.TrimSpace(s.schedule.Channels[epgChannelID].Icon); icon != "" {
+			result[channelID] = icon
+		}
 	}
 	return result
 }

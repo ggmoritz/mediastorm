@@ -103,7 +103,68 @@ func TestScheduleRejectsAmbiguousAliases(t *testing.T) {
 		service.schedule.Programs[id] = []models.EPGProgram{{ChannelID: id, Start: now.Add(-time.Hour), Stop: now.Add(time.Hour)}}
 	}
 	service.rebuildScheduleIndexLocked()
-	if programs := service.GetSchedule("SHARED", now.Add(-time.Hour), now.Add(time.Hour)); len(programs) != 0 {
+	// Only the normalized form is shared; an input matching neither name exactly stays unresolved.
+	if programs := service.GetSchedule("Shared FHD", now.Add(-time.Hour), now.Add(time.Hour)); len(programs) != 0 {
 		t.Fatalf("ambiguous alias resolved to %+v", programs)
+	}
+	// An exact display name still identifies its own channel.
+	if programs := service.GetSchedule("SHARED", now.Add(-time.Hour), now.Add(time.Hour)); len(programs) != 1 || programs[0].ChannelID != "one" {
+		t.Fatalf("exact display name resolved to %+v", programs)
+	}
+}
+
+func TestChannelIconsMatchesHDHomeRunAliases(t *testing.T) {
+	now := time.Now().UTC()
+	service := &Service{schedule: &models.EPGSchedule{
+		Channels: map[string]models.EPGChannel{
+			"station-id": {ID: "station-id", Name: "5.1", Aliases: []string{"5.1", "TESTTV"}, Icon: "https://img.example/testtv.png"},
+			"one":        {ID: "one", Name: "SHARED", Icon: "https://img.example/one.png"},
+			"two":        {ID: "two", Name: "SHARED", Icon: "https://img.example/two.png"},
+		},
+		Programs: map[string][]models.EPGProgram{
+			"station-id": {{ChannelID: "station-id", Title: "Current", Start: now.Add(-time.Hour), Stop: now.Add(time.Hour)}},
+			"one":        {{ChannelID: "one", Title: "One", Start: now.Add(-time.Hour), Stop: now.Add(time.Hour)}},
+			"two":        {{ChannelID: "two", Title: "Two", Start: now.Add(-time.Hour), Stop: now.Add(time.Hour)}},
+		},
+	}}
+	service.rebuildScheduleIndexLocked()
+	icons := service.ChannelIcons([]string{"TESTTV", "station-id", "SHARED", "missing"})
+	if icons["TESTTV"] != "https://img.example/testtv.png" || icons["station-id"] != "https://img.example/testtv.png" {
+		t.Fatalf("callsign or ID did not resolve the station icon: %v", icons)
+	}
+	if _, ok := icons["SHARED"]; ok {
+		t.Fatalf("ambiguous alias bound to an icon: %v", icons)
+	}
+	if len(icons) != 2 {
+		t.Fatalf("unexpected icons: %v", icons)
+	}
+}
+
+// "WSIM" and "WSIM-SD" both normalize to "wsim"; exact display names keep the
+// tuner's main channel and its SD subchannel apart for guide and logo lookups.
+func TestHDHomeRunSubchannelCallsignsResolveByExactName(t *testing.T) {
+	now := time.Now().UTC()
+	service := &Service{schedule: &models.EPGSchedule{
+		Channels: map[string]models.EPGChannel{
+			"us41.hdhomerun.com": {ID: "us41.hdhomerun.com", Name: "4.1", Aliases: []string{"4.1", "WSIM"}, Icon: "https://img.example/41.png"},
+			"us42.hdhomerun.com": {ID: "us42.hdhomerun.com", Name: "4.2", Aliases: []string{"4.2", "WSIM-SD"}, Icon: "https://img.example/42.png"},
+		},
+		Programs: map[string][]models.EPGProgram{
+			"us41.hdhomerun.com": {{ChannelID: "us41.hdhomerun.com", Title: "Main", Start: now.Add(-time.Hour), Stop: now.Add(time.Hour)}},
+			"us42.hdhomerun.com": {{ChannelID: "us42.hdhomerun.com", Title: "Sub", Start: now.Add(-time.Hour), Stop: now.Add(time.Hour)}},
+		},
+	}}
+	service.rebuildScheduleIndexLocked()
+
+	nowPlaying := service.GetNowPlaying([]string{"WSIM", "WSIM-SD"})
+	if nowPlaying[0].Current == nil || nowPlaying[0].Current.Title != "Main" || nowPlaying[1].Current == nil || nowPlaying[1].Current.Title != "Sub" {
+		t.Fatalf("subchannels did not resolve their own guide: %+v", nowPlaying)
+	}
+	if programs := service.GetSchedule("WSIM-SD", now.Add(-time.Hour), now.Add(time.Hour)); len(programs) != 1 || programs[0].Title != "Sub" {
+		t.Fatalf("schedule for WSIM-SD = %+v", programs)
+	}
+	icons := service.ChannelIcons([]string{"WSIM", "WSIM-SD"})
+	if icons["WSIM"] != "https://img.example/41.png" || icons["WSIM-SD"] != "https://img.example/42.png" {
+		t.Fatalf("subchannel icons = %v", icons)
 	}
 }
