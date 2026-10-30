@@ -41,6 +41,7 @@ type Service struct {
 	mu                      sync.RWMutex
 	schedule                *models.EPGSchedule
 	refreshing              bool
+	lastExhaustedRefresh    time.Time // last automatic refresh started by RefreshIfExhausted
 	lastError               string
 	discoveredSourceCount   int
 	restoreDone             chan struct{}
@@ -115,8 +116,11 @@ func NewService(storageDir string, cfgManager *config.Manager) *Service {
 			log.Printf("[epg] skipped stale cached EPG data after concurrent refresh")
 			return
 		}
-		log.Printf("[epg] loaded cached EPG data: %d channels, %d programs in %s",
-			len(schedule.Channels), countSchedulePrograms(schedule), time.Since(started))
+		now := time.Now().UTC()
+		_, upcoming, _, latest, hoursLeft := scheduleCoverage(schedule, now).logFields(now)
+		log.Printf("[epg] loaded cached EPG data: %d channels, %d programs in %s lastUpdated=%s channelsUpcoming=%d latestStop=%s hoursLeft=%d",
+			len(schedule.Channels), countSchedulePrograms(schedule), time.Since(started),
+			schedule.LastUpdated.UTC().Format(time.RFC3339), upcoming, latest, hoursLeft)
 	}()
 
 	return s
@@ -594,8 +598,14 @@ func (s *Service) Refresh(ctx context.Context) error {
 		log.Printf("[epg] failed to save EPG to disk: %v", err)
 	}
 
-	log.Printf("[epg] refresh complete: %d channels, %d programs",
-		len(newSchedule.Channels), programCount)
+	now := time.Now().UTC()
+	coverage := scheduleCoverage(newSchedule, now)
+	withPrograms, upcoming, _, latest, hoursLeft := coverage.logFields(now)
+	log.Printf("[epg] refresh complete: %d channels, %d programs channelsWithPrograms=%d channelsUpcoming=%d latestStop=%s hoursLeft=%d",
+		len(newSchedule.Channels), programCount, withPrograms, upcoming, latest, hoursLeft)
+	if coverage.exhausted() {
+		log.Printf("[epg] refresh returned a guide that is already mostly over; the source likely publishes only the current event per channel")
+	}
 
 	return nil
 }

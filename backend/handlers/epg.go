@@ -161,6 +161,7 @@ func (h *EPGHandler) GetNowPlaying(w http.ResponseWriter, r *http.Request) {
 	// Query with the negative offset so we find the correct programs in stored data,
 	// then shift response times by the positive offset.
 	result := h.epgService.GetNowPlaying(channelIDs, -offset)
+	h.epgService.RefreshIfExhausted("now query")
 	currentCount := 0
 	nextCount := 0
 	var missingCurrentIDs []string
@@ -319,6 +320,7 @@ func (h *EPGHandler) GetScheduleMultiple(w http.ResponseWriter, r *http.Request)
 	end := start.Add(time.Duration(hours) * time.Hour)
 
 	schedules := h.epgService.GetScheduleMultiple(channelIDs, start, end)
+	h.epgService.RefreshIfExhausted("schedule batch")
 	matchedChannels := 0
 	totalPrograms := 0
 	var emptyIDs []string
