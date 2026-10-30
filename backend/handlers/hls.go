@@ -362,6 +362,7 @@ type HLSSession struct {
 	CreatedAt           time.Time
 	LastAccess          time.Time
 	FFmpegCmd           *exec.Cmd
+	liveDamage          *liveUpstreamDamage // live sessions only; FFmpeg-reported upstream losses
 	Cancel              context.CancelFunc
 	mu                  sync.RWMutex
 	Completed           bool
@@ -2929,13 +2930,22 @@ func (m *HLSManager) startLiveTranscoding(ctx context.Context, session *HLSSessi
 
 	log.Printf("[hls] live session %s: FFmpeg started (PID=%d)", session.ID, pid)
 
+	session.mu.Lock()
+	if session.liveDamage == nil {
+		session.liveDamage = newLiveUpstreamDamage()
+	}
+	damage := session.liveDamage
+	session.mu.Unlock()
+
 	// Log stderr in background
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := stderr.Read(buf)
 			if n > 0 {
-				log.Printf("[hls] live session %s: FFmpeg: %s", session.ID, string(buf[:n]))
+				text := string(buf[:n])
+				log.Printf("[hls] live session %s: FFmpeg: %s", session.ID, text)
+				damage.observe(session.ID, text, time.Now())
 			}
 			if err != nil {
 				break
@@ -7258,10 +7268,14 @@ func (m *HLSManager) CleanupSession(sessionID string) {
 	if hasFirstSegment {
 		firstSegmentDelay = session.FirstSegmentTime.Sub(session.StreamStartTime)
 	}
+	damage := session.liveDamage
 	session.mu.RUnlock()
 
 	log.Printf("[hls] SESSION_SUMMARY: id=%s elapsed=%v stream_duration=%v bytes=%d segments_created=%d segments_requested=%d first_segment_delay=%v idle_timeout=%v",
 		sessionID, elapsed, streamDuration, bytesStreamed, segmentsCreated, segmentRequestCount, firstSegmentDelay, idleTriggered)
+	if summary := damage.summary(); summary != "" {
+		log.Printf("[hls] SESSION_SUMMARY: id=%s upstream damage %s", sessionID, summary)
+	}
 
 	// Stop ccextractor if running (live TV CC extraction)
 	session.mu.Lock()
