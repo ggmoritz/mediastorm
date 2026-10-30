@@ -61,33 +61,51 @@ func subtitleTrackIndex(sub playback.SubtitleTrackInfo) int {
 // pickState tells a viewer's pick from the default PlaybackInfo handed out
 // for one track type of a play session.
 type pickState struct {
-	server *int // default handed out; nil when the client asked for a track
-	picked bool // the viewer chose a track in this play session
+	server  *int // default handed out; nil when the client asked for a track
+	picked  bool // the viewer chose a track in this play session
+	pending bool // the stream's tracks were unknown when the default was handed out
 }
 
-// handedOut records the track a PlaybackInfo hands out. A track the client
-// asked for is a pick unless it repeats the default handed out before.
-func (ps *pickState) handedOut(index int, requested bool) {
+// handedOut records the track a PlaybackInfo hands out. fallback is the
+// default the bridge would have handed out without the client's request, and
+// known says whether the stream's tracks were known when it was chosen. A
+// track the client asked for is a pick unless it repeats that default or the
+// one handed out before: some clients send their current selection with the
+// first PlaybackInfo of a session.
+func (ps *pickState) handedOut(index, fallback int, requested, known bool) {
 	if requested {
-		if ps.server == nil || *ps.server != index {
-			ps.server, ps.picked = nil, true
+		if ps.server != nil && *ps.server == index {
+			return
 		}
+		if !ps.picked && index == fallback {
+			ps.server, ps.pending = intPtr(index), !known
+			return
+		}
+		ps.server, ps.picked, ps.pending = nil, true, false
 		return
 	}
-	ps.server, ps.picked = intPtr(index), false
+	ps.server, ps.picked, ps.pending = intPtr(index), false, !known
 }
 
 // reported says whether a reported track is the viewer's pick. Until the
 // viewer changes it, the client reports the default the bridge handed out
 // (often subtitles off while tracks were still unknown); remembering that
-// would override the server's own default for the whole series.
+// would override the server's own default for the whole series. When the
+// tracks were unknown, the bridge handed out a placeholder and the stream
+// starts on mediastorm's own default, so the first report sets the default
+// to compare against instead of counting as a pick.
 func (ps *pickState) reported(index int) bool {
-	if !ps.picked {
-		if ps.server != nil && *ps.server == index {
-			return false
-		}
-		ps.picked = true
+	if ps.picked {
+		return true
 	}
+	if ps.pending {
+		ps.server, ps.pending = intPtr(index), false
+		return false
+	}
+	if ps.server != nil && *ps.server == index {
+		return false
+	}
+	ps.picked = true
 	return true
 }
 

@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -141,25 +140,12 @@ func (ps *playSessions) latestForProfileItem(profileID, itemID string) (*playSes
 	return best, best != nil
 }
 
-// latestForItem returns the newest play session for (profile, item, device).
-func (ps *playSessions) latestForItem(profileID, itemID, deviceID string) (*playSession, bool) {
-	ps.mu.Lock()
-	defer ps.mu.Unlock()
-	var best *playSession
-	for _, sess := range ps.byID {
-		if sess.ProfileID == profileID && sess.ItemID == itemID && sess.DeviceID == deviceID && (best == nil || sess.created.After(best.created)) {
-			best = sess
-		}
-	}
-	return best, best != nil
-}
-
-// forReport finds the play session a report without PlaySessionId belongs
-// to: the newest one of the profile on that device for the item, preferring
-// the reported media source (Auto and the versions have their own sessions).
-// Plezy leaves the id out; Jellyfin itself matches such reports by device
-// and item.
-func (ps *playSessions) forReport(profileID, deviceID, itemID, mediaSourceID string) (*playSession, bool) {
+// latestForItem returns the newest play session for (profile, item, device),
+// preferring one of mediaSourceID when it is set (Auto and the versions have
+// their own sessions). Reports without PlaySessionId are matched this way:
+// Plezy leaves the id out, and Jellyfin itself matches such reports by
+// device and item.
+func (ps *playSessions) latestForItem(profileID, itemID, deviceID, mediaSourceID string) (*playSession, bool) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	mediaSourceID = normalizeID(mediaSourceID)
@@ -277,7 +263,7 @@ func (s *Server) vodPlaybackInfo(w http.ResponseWriter, r *http.Request, p *prin
 	// automatic choice.
 	rel, isRelease := s.releaseByMediaSource(p, itemID, ref, req.MediaSourceID)
 	var sess *playSession
-	if prev, ok := s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID); ok && time.Since(prev.created) < 2*time.Hour && prev.ReleaseKey == rel.Key &&
+	if prev, ok := s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID, ""); ok && time.Since(prev.created) < 2*time.Hour && prev.ReleaseKey == rel.Key &&
 		(prev.ReleaseKey != "" || prev.rankGen == s.rankingGeneration() || prev.playing()) {
 		prev.mu.Lock()
 		failed := prev.status != nil && prev.status.Status == playback.PrequeueStatusFailed
@@ -442,7 +428,7 @@ func (s *Server) prewarm(p *principal, itemID string) {
 	if !ok || (ref.Kind != refMovie && ref.Kind != refEpisode) || s.deps.Handlers.Prequeue == nil {
 		return
 	}
-	if _, exists := s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID); exists {
+	if _, exists := s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID, ""); exists {
 		return
 	}
 	probed := s.chaptersPending(p.Profile.ID, itemID)
@@ -581,15 +567,19 @@ func (s *Server) vodMediaSource(r *http.Request, p *principal, sess *playSession
 	if remembered, ok := s.rememberedSubtitle(p.Profile.ID, sess.Ref, status); ok {
 		subtitle, subtitleFrom = remembered, "remembered"
 	}
+	fallbackAudio, fallbackSubtitle := audio, subtitle
 	if req.AudioStreamIndex != nil && *req.AudioStreamIndex >= 0 {
 		audio, audioFrom = *req.AudioStreamIndex, "request"
 	}
 	if req.SubtitleStreamIndex != nil {
 		subtitle, subtitleFrom = *req.SubtitleStreamIndex, "request"
 	}
+	// Without the stream's tracks the defaults above are placeholders: the
+	// stream starts on mediastorm's own pick, which the first report reveals.
+	tracksKnown := status != nil && len(status.AudioTracks) > 0
 	sess.mu.Lock()
-	sess.audioPick.handedOut(audio, audioFrom == "request")
-	sess.subtitlePick.handedOut(subtitle, subtitleFrom == "request")
+	sess.audioPick.handedOut(audio, fallbackAudio, audioFrom == "request", tracksKnown)
+	sess.subtitlePick.handedOut(subtitle, fallbackSubtitle, subtitleFrom == "request", tracksKnown)
 	sess.mu.Unlock()
 	if trackLogs {
 		log.Printf("[jellyfin-bridge] tracks %s (%s): default audio=%s (%s) subtitle=%s (%s); available %s",
@@ -667,7 +657,9 @@ func (s *Server) vodMediaSource(r *http.Request, p *principal, sess *playSession
 	if audio >= 0 {
 		source.DefaultAudioStreamIndex = intPtr(audio)
 	}
-	if subtitle >= 0 {
+	// Subtitles turned off by a remembered pick or the request are sent as
+	// -1, like Jellyfin does; left out, clients apply their own default.
+	if subtitle >= 0 || subtitleFrom != "mediastorm" {
 		source.DefaultSubtitleStreamIndex = intPtr(subtitle)
 	}
 	source.HasSegments = mightHaveSegments(sess, probe)
@@ -799,7 +791,7 @@ func (s *Server) handlePlaybackReport(kind string) http.HandlerFunc {
 		}
 		sess, _ := s.plays.get(rep.PlaySessionID)
 		if sess == nil && rep.PlaySessionID == "" && rep.ItemID != "" {
-			sess, _ = s.plays.forReport(p.Profile.ID, p.Client.DeviceID, normalizeID(rep.ItemID), rep.MediaSourceID)
+			sess, _ = s.plays.latestForItem(p.Profile.ID, normalizeID(rep.ItemID), p.Client.DeviceID, rep.MediaSourceID)
 		}
 		if sess != nil && sess.ProfileID != p.Profile.ID {
 			sess = nil
@@ -870,88 +862,6 @@ func (sess *playSession) playing() bool {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	return sess.state != nil && time.Since(sess.state.At) < playingReportWindow
-}
-
-// trackLogs turns on the per-playback track diagnostics (the defaults each
-// PlaybackInfo hands out and the picks clients report): set
-// STRMR_JELLYFIN_TRACK_LOGS=1 when a client loses audio or subtitle picks.
-var trackLogs = func() bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv("STRMR_JELLYFIN_TRACK_LOGS")))
-	return v == "1" || v == "true" || v == "yes" || v == "on"
-}()
-
-// tracksChanged reports whether a report's track picks differ from the last
-// recorded ones (or are the first), so track diagnostics are logged once per
-// change rather than every few seconds.
-func (sess *playSession) tracksChanged(rep playbackReport) bool {
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	if sess.state == nil {
-		return true
-	}
-	differs := func(old, cur *int) bool { return cur != nil && (old == nil || *old != *cur) }
-	return differs(sess.state.Audio, rep.AudioIndex) || differs(sess.state.Subtitle, rep.SubtitleIndex)
-}
-
-// describeTrack names a track index of the stream for the logs:
-// "2 ger AC3", "-1 off" or "5 (not in the stream)".
-func describeTrack(status *playback.PrequeueStatusResponse, index int, audio bool) string {
-	if index < 0 {
-		return strconv.Itoa(index) + " off"
-	}
-	if status != nil {
-		if audio {
-			for _, a := range status.AudioTracks {
-				if a.Index == index {
-					return fmt.Sprintf("%d %s %s", index, orUnd(a.Language), a.Codec)
-				}
-			}
-		} else {
-			for _, sub := range status.SubtitleTracks {
-				if subtitleTrackIndex(sub) == index {
-					forced := ""
-					if sub.Forced {
-						forced = " forced"
-					}
-					return fmt.Sprintf("%d %s%s", index, orUnd(sub.Language), forced)
-				}
-			}
-		}
-	}
-	return strconv.Itoa(index) + " (not in the stream)"
-}
-
-func describeReported(status *playback.PrequeueStatusResponse, index *int, audio bool) string {
-	if index == nil {
-		return "-"
-	}
-	return describeTrack(status, *index, audio)
-}
-
-// describeTracks lists a stream's audio and subtitle tracks for the logs.
-func describeTracks(status *playback.PrequeueStatusResponse) string {
-	if status == nil {
-		return "(no stream yet)"
-	}
-	var audio, subs []string
-	for _, a := range status.AudioTracks {
-		audio = append(audio, fmt.Sprintf("%d:%s", a.Index, orUnd(a.Language)))
-	}
-	for _, sub := range status.SubtitleTracks {
-		entry := fmt.Sprintf("%d:%s", subtitleTrackIndex(sub), orUnd(sub.Language))
-		if sub.Forced {
-			entry += "(forced)"
-		}
-		subs = append(subs, entry)
-	}
-	return "audio [" + strings.Join(audio, " ") + "] subtitles [" + strings.Join(subs, " ") + "]"
-}
-
-func orUnd(lang string) string {
-	if strings.TrimSpace(lang) == "" {
-		return "und"
-	}
-	return lang
 }
 
 // recordState keeps the client's latest report. Progress reports repeat the

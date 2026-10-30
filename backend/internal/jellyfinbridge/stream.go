@@ -440,7 +440,7 @@ func (s *Server) mediaSession(r *http.Request, itemID, mediaSourceID string) (*p
 	if !ok {
 		return nil, false
 	}
-	if sess, ok := s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID); ok {
+	if sess, ok := s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID, ""); ok {
 		return sess, true
 	}
 	return s.plays.latestForProfileItem(p.Profile.ID, itemID)

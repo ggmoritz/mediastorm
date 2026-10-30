@@ -203,7 +203,7 @@ func (s *Server) handleMediaSegments(w http.ResponseWriter, r *http.Request) {
 	id := normalizeID(pathVar(r, "id"))
 	sess, ok := s.playByMediaSource(id)
 	if !ok {
-		sess, ok = s.plays.latestForItem(p.Profile.ID, id, p.Client.DeviceID)
+		sess, ok = s.plays.latestForItem(p.Profile.ID, id, p.Client.DeviceID, "")
 	}
 	if !ok || sess.ProfileID != p.Profile.ID {
 		writeJSON(w, http.StatusOK, dto.NewQueryResult[dto.MediaSegmentDto](nil, 0, 0))

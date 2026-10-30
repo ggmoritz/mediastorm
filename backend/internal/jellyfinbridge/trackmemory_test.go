@@ -139,9 +139,9 @@ func TestReportWithoutPlaySessionIDFindsTheSession(t *testing.T) {
 	}
 }
 
-// forReport prefers the session of the reported media source (Auto and
+// latestForItem prefers the session of the reported media source (Auto and
 // versions have their own) and otherwise takes the newest one.
-func TestForReportPrefersReportedMediaSource(t *testing.T) {
+func TestLatestForItemPrefersReportedMediaSource(t *testing.T) {
 	ps := newPlaySessions()
 	now := time.Now()
 	const itemID, versionID = "0f751e0e9b925b4da5d502b33c8770e6", "5951ff4d7440431daf8378ebfb26296b"
@@ -151,13 +151,13 @@ func TestForReportPrefersReportedMediaSource(t *testing.T) {
 	ps.add(auto)
 	ps.add(version)
 	ps.add(other)
-	if got, _ := ps.forReport("p", "d", itemID, itemID); got != auto {
+	if got, _ := ps.latestForItem("p", itemID, "d", itemID); got != auto {
 		t.Errorf("reported Auto source: got %v", got)
 	}
-	if got, _ := ps.forReport("p", "d", itemID, ""); got != version {
+	if got, _ := ps.latestForItem("p", itemID, "d", ""); got != version {
 		t.Errorf("no source: want the newest session on the device, got %v", got)
 	}
-	if got, ok := ps.forReport("p", "d", "other-item", ""); ok {
+	if got, ok := ps.latestForItem("p", "other-item", "d", ""); ok {
 		t.Errorf("other item matched %v", got)
 	}
 }
@@ -199,6 +199,13 @@ func TestReportsWithoutPlaySessionIDStopAndOnlyLearnPicks(t *testing.T) {
 	report("/Sessions/Playing/Stopped", -1)
 	if _, ok := h.srv.plays.get(info.PlaySessionID); ok {
 		t.Error("a stop report without PlaySessionId must end the play session")
+	}
+
+	// Opened again, the remembered "off" is sent as -1 rather than left out,
+	// so the client does not fall back to its own default (forced German).
+	again := decode[dto.PlaybackInfoResponse](t, h.do(http.MethodPost, "/Items/"+item+"/PlaybackInfo", tok, map[string]any{}))
+	if d := again.MediaSources[0].DefaultSubtitleStreamIndex; d == nil || *d != -1 {
+		t.Errorf("DefaultSubtitleStreamIndex = %v, want -1", d)
 	}
 }
 
@@ -295,16 +302,47 @@ func TestRememberedAudioKeepsMediastormsTrackOfThatLanguage(t *testing.T) {
 // PlaybackInfo has not picked anything.
 func TestPickStateIgnoresRequestedDefault(t *testing.T) {
 	var ps pickState
-	ps.handedOut(3, false)
-	ps.handedOut(3, true)
+	ps.handedOut(3, 3, false, true)
+	ps.handedOut(3, 3, true, true)
 	if ps.reported(3) {
 		t.Fatal("the echoed default counted as a pick")
 	}
 	if !ps.reported(2) || !ps.reported(3) {
 		t.Fatal("a changed track is a pick, and later reports stay picks")
 	}
-	ps.handedOut(2, true)
+	ps.handedOut(2, 3, true, true)
 	if !ps.picked {
 		t.Fatal("asking for another track is a pick")
+	}
+}
+
+// A client that sends its current selection with the first PlaybackInfo of a
+// session has not picked anything when that selection is the default.
+func TestPickStateIgnoresDefaultRequestedFirst(t *testing.T) {
+	var ps pickState
+	ps.handedOut(1, 1, true, true)
+	if ps.picked || ps.reported(1) {
+		t.Fatal("the default sent with the first PlaybackInfo counted as a pick")
+	}
+	var other pickState
+	other.handedOut(2, 1, true, true)
+	if !other.picked {
+		t.Fatal("asking for another track than the default is a pick")
+	}
+}
+
+// When the stream's tracks were unknown at PlaybackInfo, the first report
+// shows the track mediastorm started on; only a later change is a pick.
+func TestPickStateLearnsDefaultFromFirstReportWhenTracksUnknown(t *testing.T) {
+	var ps pickState
+	ps.handedOut(-1, -1, false, false)
+	if ps.reported(1) {
+		t.Fatal("the track the stream started on counted as a pick")
+	}
+	if ps.reported(1) {
+		t.Fatal("repeating the starting track counted as a pick")
+	}
+	if !ps.reported(2) {
+		t.Fatal("switching away from the starting track is a pick")
 	}
 }

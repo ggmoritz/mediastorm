@@ -27,7 +27,7 @@ const stopReloadGrace = 30 * time.Second
 func (s *Server) stopPlayback(ctx context.Context, p *principal, itemID string, sess *playSession) {
 	s.stopped.Store(chaptersKey(p.Profile.ID, itemID), time.Now())
 	if sess == nil {
-		sess, _ = s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID)
+		sess, _ = s.plays.latestForItem(p.Profile.ID, itemID, p.Client.DeviceID, "")
 	}
 	if sess != nil {
 		s.plays.remove(sess.ID)
