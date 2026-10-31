@@ -182,9 +182,19 @@ func TestArtworkTagsInvalidateOldMismatchedCache(t *testing.T) {
 }
 
 func TestLegacySeasonImageFallsBackToParentWithoutListing(t *testing.T) {
-	s := artworkServer(t)
+	cacheDir := t.TempDir()
+	s := New(Deps{CacheDir: cacheDir}, config.JellyfinBridgeSettings{})
 	series := s.seriesRefFrom(titleInfo{MediaType: "series", ID: "tmdb:tv:2004", Name: "Malcolm in the Middle", Poster: "https://img.example/series-poster.jpg"})
 	id := s.ids.put(refSeason, seasonSource(series.Src, 1), refContext{Season: 1})
+	if err := s.Shutdown(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s = New(Deps{CacheDir: cacheDir}, config.JellyfinBridgeSettings{})
+	t.Cleanup(func() { _ = s.Shutdown(t.Context()) })
+	ref, ok := s.ids.get(id)
+	if !ok || ref.Ctx.SeriesPoster != "" || ref.Ctx.Poster != "" {
+		t.Fatal("fixture did not reload an unmodified legacy season ref")
+	}
 	item := dto.BaseItemDto{ID: id, ImageTags: imageTagsFor(series.Info.Poster)}
 	assertArtwork(t, s, item, dto.ImagePrimary, series.Info.Poster)
 }
