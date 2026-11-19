@@ -20,6 +20,7 @@ import (
 	"novastream/config"
 	"novastream/internal/datastore"
 	"novastream/models"
+	"novastream/services/qualityprofiles"
 )
 
 // BackupType indicates how the backup was created
@@ -823,6 +824,7 @@ type localMediaItemExport struct {
 //   - notification_progress_messages (live Discord message IDs)
 //   - import_queue, file_health, media_files, queue_stats
 //   - goose_db_version, app_data_migrations
+//   - quality_snapshot_cache (downloaded TRaSH archives, refetched on demand)
 //
 // Global app settings (scheduled tasks / automations / scrapers / indexers / etc.)
 // live in settings.json and are backed up as a separate archive member.
@@ -856,6 +858,7 @@ type databaseExport struct {
 	LibraryAccessPolicies    map[string]models.LibraryAccessPolicy  `json:"libraryAccessPolicies,omitempty"`
 	Recordings               []models.Recording                     `json:"recordings,omitempty"`
 	NumbersStationProgress   []models.NumbersStationProgress        `json:"numbersStationProgress"`
+	QualityPresets           []*qualityprofiles.Preset              `json:"qualityPresets,omitempty"`
 }
 
 type customListExport struct {
@@ -893,6 +896,7 @@ var databaseExportSections = []string{
 	"libraryAccessPolicies",
 	"recordings",
 	"numbersStationProgress",
+	"qualityPresets",
 }
 
 // exportDatabaseBytes queries durable tables and returns the export as JSON bytes.
@@ -1102,6 +1106,12 @@ func (s *Service) exportDatabaseBytes() ([]byte, error) {
 		return nil, fmt.Errorf("export recordings: %w", err)
 	}
 	export.Recordings = recordings
+
+	presets, err := s.store.QualityPresets().ListPresets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("export quality presets: %w", err)
+	}
+	export.QualityPresets = presets
 
 	export.ContentPreferences = make(map[string][]models.ContentPreference)
 	export.CustomLists = make(map[string][]customListExport)
@@ -1404,6 +1414,14 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 				return fmt.Errorf("restore recording %s: %w", recording.ID, err)
 			}
 		}
+		for _, preset := range export.QualityPresets {
+			if preset == nil {
+				continue
+			}
+			if err := tx.QualityPresets().SavePreset(ctx, preset); err != nil {
+				return fmt.Errorf("restore quality preset %s: %w", preset.ID, err)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -1419,6 +1437,15 @@ func (s *Service) importDatabaseBytes(data []byte) error {
 // clearNonCascadedBackupTables removes durable rows that are not FK-cascaded from
 // users/accounts so restore can re-insert backup data without conflicts.
 func clearNonCascadedBackupTables(ctx context.Context, tx *datastore.Tx) error {
+	presets, err := tx.QualityPresets().ListPresets(ctx)
+	if err != nil {
+		return fmt.Errorf("list quality presets for clear: %w", err)
+	}
+	for _, p := range presets {
+		if err := tx.QualityPresets().DeletePreset(ctx, p.ID); err != nil {
+			return fmt.Errorf("clear quality preset %s: %w", p.ID, err)
+		}
+	}
 	if err := tx.ShareLinks().DeleteAll(ctx); err != nil {
 		return fmt.Errorf("clear share links: %w", err)
 	}

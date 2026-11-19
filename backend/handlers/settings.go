@@ -55,6 +55,9 @@ func shouldClearPrequeueForGlobalSettingsChange(oldSettings, newSettings config.
 	if !reflect.DeepEqual(oldSettings.Ranking, newSettings.Ranking) {
 		return true
 	}
+	if !reflect.DeepEqual(oldSettings.QualityPresets, newSettings.QualityPresets) {
+		return true
+	}
 	return false
 }
 
@@ -1468,6 +1471,28 @@ func hasEffectiveXtreamEPGConfig(s *config.Settings) bool {
 		strings.TrimSpace(s.Live.XtreamHost) != "" &&
 		strings.TrimSpace(s.Live.XtreamUsername) != "" &&
 		strings.TrimSpace(s.Live.XtreamPassword) != ""
+}
+
+// EnsureQualityPresetSyncTask adds the hourly task that checks quality
+// presets for upstream updates (each preset's own schedule decides whether
+// it is due). It returns true when the settings changed.
+func EnsureQualityPresetSyncTask(s *config.Settings) bool {
+	for _, task := range s.ScheduledTasks.Tasks {
+		if task.Type == config.ScheduledTaskTypeQualityPresetSync {
+			return false
+		}
+	}
+	s.ScheduledTasks.Tasks = append(s.ScheduledTasks.Tasks, config.ScheduledTask{
+		ID:         "auto-quality-preset-sync",
+		Type:       config.ScheduledTaskTypeQualityPresetSync,
+		Name:       "Quality preset updates",
+		Enabled:    true,
+		Frequency:  config.ScheduledTaskFrequencyHourly,
+		Config:     map[string]string{},
+		LastStatus: config.ScheduledTaskStatusPending,
+		CreatedAt:  time.Now(),
+	})
+	return true
 }
 
 // EnsureEPGTaskForGuide auto-creates an EPG refresh task when guide/EPG

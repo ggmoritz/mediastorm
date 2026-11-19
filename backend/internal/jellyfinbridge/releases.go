@@ -61,7 +61,7 @@ type releaseList struct {
 
 type releaseCache struct {
 	mu       sync.Mutex
-	lists    map[string]*releaseList // profile|item
+	lists    map[string]*releaseList // profile|item|preset
 	versions map[string]string       // version ID -> item ID
 }
 
@@ -85,7 +85,7 @@ func (s *Server) versionItem(id string) (string, bool) {
 // releasesFor returns the releases known for an item (none while the search
 // runs) and starts a search when there is no fresh list.
 func (s *Server) releasesFor(p *principal, itemID string, ref itemRef) []release {
-	return s.releasesWait(p, itemID, ref, 0)
+	return s.releasesWait(p, itemID, ref, 0, "")
 }
 
 // releaseVersionCount is how many releases are offered as versions.
@@ -109,12 +109,14 @@ func (s *Server) prefetchReleases(p *principal, itemID string) {
 	}
 }
 
-// releasesWait is releasesFor waiting up to wait for a running search.
-func (s *Server) releasesWait(p *principal, itemID string, ref itemRef, wait time.Duration) []release {
+// releasesWait is releasesFor waiting up to wait for a running search,
+// ranked by presetID ("" for the profile's own preset).
+func (s *Server) releasesWait(p *principal, itemID string, ref itemRef, wait time.Duration, presetID string) []release {
 	if (ref.Kind != refMovie && ref.Kind != refEpisode) || s.deps.Handlers.IndexerSearch == nil {
 		return nil
 	}
-	key := p.Profile.ID + "|" + itemID
+	// Per device: the search uses the device's own filter and preset settings.
+	key := deviceKey(p) + "|" + itemID + "|" + presetID
 	s.releases.mu.Lock()
 	gen := s.rankingGeneration()
 	list, ok := s.releases.lists[key]
@@ -130,7 +132,7 @@ func (s *Server) releasesWait(p *principal, itemID string, ref itemRef, wait tim
 		}
 		list = &releaseList{done: make(chan struct{}), gen: gen}
 		s.releases.lists[key] = list
-		go s.searchReleases(p, ref, list)
+		go s.searchReleases(p, ref, presetID, list)
 	}
 	ready, done := list.ready, list.done
 	s.releases.mu.Unlock()
@@ -145,10 +147,10 @@ func (s *Server) releasesWait(p *principal, itemID string, ref itemRef, wait tim
 	return list.items
 }
 
-func (s *Server) searchReleases(p *principal, ref itemRef, list *releaseList) {
+func (s *Server) searchReleases(p *principal, ref itemRef, presetID string, list *releaseList) {
 	ctx, cancel := context.WithTimeout(context.Background(), releaseSearchWait)
 	defer cancel()
-	items, err := s.fetchReleases(ctx, p, ref)
+	items, err := s.fetchReleases(ctx, p, ref, presetID)
 	if err != nil {
 		log.Printf("[jellyfin-bridge] release search for %s: %v", ref.Source, err)
 	}
@@ -161,7 +163,7 @@ func (s *Server) searchReleases(p *principal, ref itemRef, list *releaseList) {
 // fetchReleases runs mediastorm's indexer search the way the prequeue does
 // (same title, episode code, IDs and profile) and keeps the first results
 // that passed the profile's filters, in mediastorm's ranking order.
-func (s *Server) fetchReleases(ctx context.Context, p *principal, ref itemRef) ([]release, error) {
+func (s *Server) fetchReleases(ctx context.Context, p *principal, ref itemRef, presetID string) ([]release, error) {
 	req, err := s.prequeueRequest(ctx, p, ref)
 	if err != nil {
 		return nil, err
@@ -179,6 +181,9 @@ func (s *Server) fetchReleases(ctx context.Context, p *principal, ref itemRef) (
 	}
 	if p.Client.DeviceID != "" {
 		q.Set("clientId", "jellyfin-"+p.Client.DeviceID)
+	}
+	if presetID != "" {
+		q.Set("qualityPreset", presetID)
 	}
 	var results []json.RawMessage
 	if _, err := callJSON(s.deps.Handlers.IndexerSearch, internalRequest(ctx, p, http.MethodGet, "/api/indexers/search?"+q.Encode(), nil, nil), &results); err != nil {
@@ -312,11 +317,12 @@ func (s *Server) releaseByMediaSource(p *principal, itemID string, ref itemRef, 
 }
 
 // releasesCached returns a fresh release list found earlier for the item,
-// without starting a search.
+// without starting a search. It is the device's list for its own preset,
+// keyed as in releasesWait.
 func (s *Server) releasesCached(p *principal, itemID string) []release {
 	s.releases.mu.Lock()
 	defer s.releases.mu.Unlock()
-	list, ok := s.releases.lists[p.Profile.ID+"|"+itemID]
+	list, ok := s.releases.lists[deviceKey(p)+"|"+itemID+"|"]
 	if !ok || !list.ready || time.Since(list.fetched) > list.ttl() || list.gen != s.rankingGeneration() {
 		return nil
 	}
@@ -324,18 +330,36 @@ func (s *Server) releasesCached(p *principal, itemID string) []release {
 }
 
 // itemVersions lists an item's versions for clients: the automatic pick
-// first, then the releases found so far. It never searches: clients fetch
-// items in bulk while browsing, so the list comes from playback's search.
+// first, then the quality presets offered in pickers, then the releases
+// found so far. It never searches: clients fetch items in bulk while
+// browsing, so the list comes from playback's search.
 func (s *Server) itemVersions(p *principal, item *dto.BaseItemDto, ref itemRef) {
-	if (ref.Kind != refMovie && ref.Kind != refEpisode) || s.releaseVersionCount() == 0 {
+	if ref.Kind != refMovie && ref.Kind != refEpisode {
 		return
 	}
-	releases := s.shownReleases(s.releasesCached(p, item.ID))
+	ctx, cancel := context.WithTimeout(context.Background(), presetLookupWait)
+	presets := s.presetVersions(ctx, p, item.ID, ref)
+	autoLabel := s.autoVersionLabel(ctx, p, item.ID, ref)
+	def := s.presetsForItem(ctx, p, item.ID, ref).def
+	cancel()
+	releaseVersions := s.releaseVersionCount() > 0
+	var releases []release
+	if releaseVersions {
+		releases = s.shownReleases(s.releasesCached(p, item.ID))
+	}
+	if len(presets) == 0 && !releaseVersions {
+		return
+	}
 	// The default version's ID is the item ID, as in Jellyfin: clients only
 	// load a version as a separate item when its ID differs.
-	versions := []dto.MediaSourceInfo{versionStub(item.ID, "Auto (mediastorm)", item.RunTimeTicks)}
+	versions := []dto.MediaSourceInfo{versionStub(item.ID, autoLabel, item.RunTimeTicks)}
 	s.releases.mu.Lock()
-	if len(releases) == 0 {
+	for _, c := range presets {
+		id := s.presetMediaSourceID(p, item.ID, c.ID)
+		s.releases.versions[id] = item.ID
+		versions = append(versions, versionStub(id, presetVersionLabel(c, def), item.RunTimeTicks))
+	}
+	if releaseVersions && len(releases) == 0 {
 		// No releases searched yet: offer a version that searches when it is
 		// picked (loaded as an item) or played.
 		id := s.findReleasesID(p, item.ID)

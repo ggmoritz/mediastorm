@@ -32,6 +32,7 @@ import (
 	"novastream/models"
 	"novastream/services/debrid"
 	"novastream/services/demomedia"
+	"novastream/services/qualityprofiles"
 	"novastream/utils/filter"
 	"novastream/utils/language"
 
@@ -180,6 +181,8 @@ type Service struct {
 	searchSplitCount   atomic.Int64 // top-level SearchWithScoringSplit calls (prequeue streaming search)
 	usenetAPICallCount atomic.Int64 // individual usenet/torznab indexer API calls
 	providerBreaker    *providerbreaker.Breaker
+	presets            QualityPresetProvider
+	titlePresets       TitlePresetProvider
 }
 
 type searchCacheEntry struct {
@@ -250,6 +253,9 @@ type effectiveFilterBundle struct {
 	Default models.FilterSettings
 	Debrid  models.FilterSettings
 	Usenet  models.FilterSettings
+	// caps are the adaptive device caps, kept so preset mode can reapply
+	// them after dropping preference filters.
+	caps models.AdaptiveCaps
 }
 
 type effectiveRankingBundle struct {
@@ -593,6 +599,7 @@ func (s *Service) getEffectiveFilterBundle(userID, clientID string, throughput *
 	caps.ApplyTo(&bundle.Default)
 	caps.ApplyTo(&bundle.Debrid)
 	caps.ApplyTo(&bundle.Usenet)
+	bundle.caps = caps
 
 	return bundle, animeSettings, overrides
 }
@@ -1030,7 +1037,7 @@ func compareByRankingCriteria(i, j models.NZBResult, scoringCtx ScoringContext) 
 	}
 
 	if scoringCtx.UseDownloadRanking {
-		if cmp := compareDownloadPreferredTerms(i, j, scoringCtx.DownloadPreferredTerms); cmp != 0 {
+		if cmp := compareWeights(scoringCtx.termWeight(i.Title, termDownload), scoringCtx.termWeight(j.Title, termDownload)); cmp != 0 {
 			return cmp
 		}
 	}
@@ -1040,24 +1047,11 @@ func compareByRankingCriteria(i, j models.NZBResult, scoringCtx ScoringContext) 
 			continue
 		}
 
-		var cmp int
-		switch criterion.ID {
-		case config.RankingServicePriority:
-			cmp = compareServicePriority(i, j, scoringCtx.ServicePriority)
-		case config.RankingPreferredTerms:
-			cmp = comparePreferredTerms(i, j, scoringCtx.PreferredTerms)
-		case config.RankingNonPreferredTerms:
-			cmp = compareNonPreferredTerms(i, j, scoringCtx.NonPreferredTerms)
-		case config.RankingResolution:
-			cmp = compareResolution(i, j)
-		case config.RankingLanguage:
-			cmp = compareLanguage(i, j, scoringCtx.PreferredLang)
-		case config.RankingSize:
-			cmp = compareSize(i, j)
-		case config.RankingPreferredScraper:
-			cmp = comparePreferredScraper(i, j, scoringCtx.PreferredScraper)
+		def, ok := rankingRegistry[criterion.ID]
+		if !ok {
+			continue
 		}
-		if cmp != 0 {
+		if cmp := def.compare(i, j, scoringCtx); cmp != 0 {
 			return cmp
 		}
 	}
@@ -1234,6 +1228,7 @@ func (s *Service) buildScoringContextWithCriteria(opts SearchOptions, settings c
 		PreferredLang:          s.getEffectiveAudioLanguage(opts.UserID, opts.ClientID, settings),
 		ExplicitAudioLanguage:  s.explicitAudioLanguageFor(opts),
 		PreferredScraper:       models.StringVal(filterSettings.PreferredScraper, settings.Filtering.PreferredScraper),
+		weightCache:            newTermWeightCache(),
 	}
 }
 
@@ -1294,6 +1289,15 @@ type SearchOptions struct {
 	SkipFilter            bool                              // When true, skip filtering entirely (used by SearchTest)
 	UseDownloadRanking    bool                              // When true, apply download-only preferred terms as a final ranking boost
 	SeasonPacksOnly       bool                              // When true, keep only releases that cover the whole target season ("Download Season")
+	// QualityPreset requests a quality preset for this search ("simple" for
+	// the simple ranking); honoured when settings allow request overrides.
+	QualityPreset string
+	// RuntimeMinutes is the title's runtime (per episode for series), used
+	// by quality presets for size limits and preferred sizes.
+	RuntimeMinutes int
+
+	activePreset   *qualityprofiles.Active
+	presetResolved bool
 
 	// Internal Newznab request controls used by the daily-show tiered search.
 	usenetSearchType      string
@@ -1604,10 +1608,17 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 
 	// Get effective filtering settings (cascade: global -> profile -> client)
 	filterBundle, animeSettings, filterOverrides := s.getEffectiveFilterBundle(opts.UserID, opts.ClientID, opts.AdaptiveThroughput, settings)
+	servicePriority := config.StreamingServicePriority(models.StringVal(filterBundle.Default.ServicePriority, string(settings.Filtering.ServicePriority)))
+	opts = s.withQualityPreset(ctx, opts, settings)
+	if opts.activePreset != nil {
+		// The preset decides what is wanted; only identity checks and the
+		// adaptive device caps still filter.
+		filterBundle = filterBundle.withoutPreferences()
+	}
 	filterSettings := filterBundle.Default
 
 	// Inject anime language filter-out terms early (before search/filter calls)
-	if opts.IsAnime && models.BoolVal(animeSettings.AnimeLanguageEnabled, false) {
+	if opts.activePreset == nil && opts.IsAnime && models.BoolVal(animeSettings.AnimeLanguageEnabled, false) {
 		langCode := ""
 		if animeSettings.AnimePreferredLanguage != nil {
 			langCode = *animeSettings.AnimePreferredLanguage
@@ -1640,7 +1651,7 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 	rankingBundle := s.getEffectiveRankingBundle(opts.UserID, opts.ClientID, settings)
 	rankingCriteria := rankingBundle.Default
 	cacheTitles := combineFilterTitles(filterTitles)
-	cacheKey := s.searchCacheKey("ranked", opts, settings, cacheTitles, filterSettings, filterBundle, animeSettings, filterOverrides, rankingCriteria, rankingBundle)
+	cacheKey := s.searchCacheKey("ranked", opts, settings, cacheTitles, filterSettings, filterBundle, animeSettings, filterOverrides, rankingCriteria, rankingBundle) + presetCacheKey(opts.activePreset)
 	if cached, ok := s.getCachedSearchResults(cacheKey, searchStart); ok {
 		log.Printf("[indexer] search cache hit for query=%q mediaType=%q user=%q client=%q results=%d", opts.Query, opts.MediaType, opts.UserID, opts.ClientID, len(cached))
 		log.Printf("[search-stats] Search #%d cache hit: %d results in %v (totals: search=%d, splitSearch=%d, usenetAPICalls=%d)",
@@ -1649,7 +1660,7 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 		return cached, nil
 	}
 	sourceOpts := opts
-	if rankingBundle.NewestReleaseFirst || opts.SeasonPacksOnly {
+	if rankingBundle.NewestReleaseFirst || opts.SeasonPacksOnly || opts.activePreset != nil {
 		// Source-level caps can discard newer releases before the final
 		// cross-source ordering override has a chance to see them, and in
 		// season-pack mode single episodes would crowd packs out of the cap.
@@ -1722,6 +1733,7 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 				EpisodeReleased:       opts.EpisodeReleased,
 				SkipFilter:            opts.SkipFilter,
 				SeasonPacksOnly:       opts.SeasonPacksOnly,
+				PreferenceFiltersOff:  opts.activePreset != nil,
 			}
 			debridResults, err := s.searchDebridTitles(ctx, debOpts, opts, alternateTitles)
 			log.Printf("[indexer] TIMING: debrid search complete (took: %v, results: %d)", time.Since(debridStart), len(debridResults))
@@ -1774,7 +1786,19 @@ func (s *Service) Search(ctx context.Context, opts SearchOptions) ([]models.NZBR
 	bypassRanking := shouldBypassAIOStreamsRanking(settings, filterOverrides, includeUsenet)
 
 	var scoringCtx *ScoringContext
-	if rankingBundle.NewestReleaseFirst {
+	if opts.activePreset != nil {
+		var simple bool
+		aggregated, simple = s.rankWithPresetChain(ctx, opts.activePreset, aggregated, opts, servicePriority)
+		if simple {
+			// The simple ranking needs its own filters, so search again
+			// without the preset; cached under this search's key as well.
+			results, err := s.Search(ctx, withoutPreset(opts))
+			if err == nil {
+				s.setCachedSearchResults(cacheKey, results, time.Now())
+			}
+			return results, err
+		}
+	} else if rankingBundle.NewestReleaseFirst {
 		log.Printf("[indexer] Sorting %d results by newest release first; explicit audio preference remains first", len(aggregated))
 		sortResultsNewestReleaseFirst(aggregated, s.explicitAudioLanguageFor(opts))
 	} else if bypassRanking {
@@ -1880,6 +1904,11 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 	s.discoverCrossMapping(ctx, settings, opts)
 
 	filterBundle, animeSettings, filterOverrides := s.getEffectiveFilterBundle(opts.UserID, opts.ClientID, opts.AdaptiveThroughput, settings)
+	servicePriority := config.StreamingServicePriority(models.StringVal(filterBundle.Default.ServicePriority, string(settings.Filtering.ServicePriority)))
+	opts = s.withQualityPreset(ctx, opts, settings)
+	if opts.activePreset != nil {
+		filterBundle = filterBundle.withoutPreferences()
+	}
 	filterSettings := filterBundle.Default
 	if opts.AdaptiveSummary != nil {
 		*opts.AdaptiveSummary = buildAdaptiveSearchSummary(filterSettings, settings, opts)
@@ -1888,7 +1917,7 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 	rankingBundle := s.getEffectiveRankingBundle(opts.UserID, opts.ClientID, settings)
 	metadataLanguage := s.getEffectiveMetadataLanguage(opts.UserID, settings)
 	_, filterTitles, _ := s.resolveSearchTitles(ctx, opts, metadataLanguage, settings.Streaming.MaxAlternateTitleSearches)
-	if shouldBypassAIOStreamsRanking(settings, filterOverrides, shouldUseUsenet(settings.Streaming.ServiceMode)) {
+	if opts.activePreset == nil && shouldBypassAIOStreamsRanking(settings, filterOverrides, shouldUseUsenet(settings.Streaming.ServiceMode)) {
 		if opts.AdaptiveSummary != nil {
 			opts.AdaptiveSummary.Bypassed = true
 			opts.AdaptiveSummary.MaxSizeGB = nil
@@ -1897,7 +1926,7 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 		scored := bypassScoredResults(rawResults, rankingBundle.NewestReleaseFirst, opts.IncludeScoreBreakdown, s.explicitAudioLanguageFor(opts))
 		return capScoredResults(scored, opts.MaxResults), nil
 	}
-	if opts.IsAnime && models.BoolVal(animeSettings.AnimeLanguageEnabled, false) {
+	if opts.activePreset == nil && opts.IsAnime && models.BoolVal(animeSettings.AnimeLanguageEnabled, false) {
 		langCode := ""
 		if animeSettings.AnimePreferredLanguage != nil {
 			langCode = *animeSettings.AnimePreferredLanguage
@@ -1950,6 +1979,17 @@ func (s *Service) SearchWithScoring(ctx context.Context, opts SearchOptions) ([]
 			detailed[i].Result = passedResults[passedIndex]
 			passedIndex++
 		}
+	}
+	if opts.activePreset != nil {
+		passed, filtered, simple := s.scoreWithPresetChain(opts.activePreset, detailed, opts, servicePriority)
+		if simple {
+			// The simple ranking needs its own filters: run again without
+			// the preset (the raw results come from the cache).
+			return s.SearchWithScoring(ctx, withoutPreset(opts))
+		}
+		passed = capPerResolution(passed, models.IntVal(filterOverrides.MaxResultsPerResolution, 0))
+		prioritizeExplicitAudioScored(passed, s.explicitAudioLanguageFor(opts))
+		return capScoredResults(append(passed, filtered...), opts.MaxResults), nil
 	}
 	scoringCtx := s.buildScoringContextWithCriteria(opts, settings, filterSettings, animeSettings, rankingBundle.Default)
 
@@ -2128,14 +2168,15 @@ func (s *Service) SearchWithScoringSplit(ctx context.Context, opts SearchOptions
 
 	filterBundle, animeSettings, filterOverrides := s.getEffectiveFilterBundle(opts.UserID, opts.ClientID, opts.AdaptiveThroughput, settings)
 	filterSettings := filterBundle.Default
+	opts = s.withQualityPreset(ctx, opts, settings)
 
 	// Mirror SearchWithScoring: skip filter/rank for the debrid source when
 	// AIOStreams is the only enabled scraper and the bypass setting is on.
-	bypassAIOStreamsRanking := shouldBypassAIOStreamsRanking(settings, filterOverrides, includeUsenet)
+	bypassAIOStreamsRanking := opts.activePreset == nil && shouldBypassAIOStreamsRanking(settings, filterOverrides, includeUsenet)
 
 	// Inject anime language filter-out terms early (before search/filter calls),
 	// mirroring Search/SearchWithScoring.
-	if opts.IsAnime && models.BoolVal(animeSettings.AnimeLanguageEnabled, false) {
+	if opts.activePreset == nil && opts.IsAnime && models.BoolVal(animeSettings.AnimeLanguageEnabled, false) {
 		langCode := ""
 		if animeSettings.AnimePreferredLanguage != nil {
 			langCode = *animeSettings.AnimePreferredLanguage
@@ -2169,6 +2210,11 @@ func (s *Service) SearchWithScoringSplit(ctx context.Context, opts SearchOptions
 	// the complete title identities so both pipelines compute the identical key.
 	cacheTitles := combineFilterTitles(filterTitles)
 	cacheKey := s.searchCacheKey("raw", opts, settings, cacheTitles, filterSettings, filterBundle, animeSettings, filterOverrides, rankingCriteria, rankingBundle)
+	if opts.activePreset != nil {
+		// After the raw cache key (raw results do not depend on the preset).
+		filterBundle = filterBundle.withoutPreferences()
+		filterSettings = filterBundle.Default
+	}
 	if cached, ok := s.getCachedSearchResults(cacheKey, searchStart); ok {
 		log.Printf("[indexer] raw search cache hit for query=%q mediaType=%q user=%q client=%q results=%d", opts.Query, opts.MediaType, opts.UserID, opts.ClientID, len(cached))
 		// A cache hit carries only the merged aggregate, so partition it by the
@@ -2475,6 +2521,17 @@ func (s *Service) scoreSourceCandidates(opts SearchOptions, settings config.Sett
 		if detailed[i].Passed {
 			detailed[i].Result = passedResults[passedIndex]
 			passedIndex++
+		}
+	}
+
+	if opts.activePreset != nil {
+		priority := config.StreamingServicePriority(models.StringVal(filterBundle.Default.ServicePriority, string(settings.Filtering.ServicePriority)))
+		passed, filtered, simple := s.scoreWithPresetChain(opts.activePreset, detailed, opts, priority)
+		// Per source, as this mode ranks each source on its own. The simple
+		// ranking continues below with this search's filters.
+		if !simple {
+			passed = capPerResolution(passed, models.IntVal(filterOverrides.MaxResultsPerResolution, 0))
+			return passed, len(filtered)
 		}
 	}
 

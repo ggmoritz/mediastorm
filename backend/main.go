@@ -28,6 +28,7 @@ import (
 	"novastream/internal/jellyfinbridge"
 	"novastream/internal/mediaidentity"
 	"novastream/internal/nzbfetch"
+	"novastream/internal/netproxy"
 	"novastream/internal/pool"
 	"novastream/internal/providerbreaker"
 	"novastream/internal/slogutil"
@@ -63,6 +64,7 @@ import (
 	"novastream/services/plex"
 	"novastream/services/prewarm"
 	"novastream/services/profileunlock"
+	"novastream/services/qualityprofiles"
 	"novastream/services/realtimesessions"
 	"novastream/services/recordings"
 	"novastream/services/remoteaccess"
@@ -638,6 +640,27 @@ func main() {
 	indexerService.SetClientSettingsProvider(clientSettingsService)
 	metadataHandler.SetClientSettingsProvider(clientSettingsService)
 
+	// Quality presets: Sonarr/Radarr quality profiles and custom formats
+	// (TRaSH-Guides, Sonarr/Radarr instances or hand-made) used for ranking.
+	var qualityPresetStore qualityprofiles.Store
+	if store != nil {
+		qualityPresetStore = store.QualityPresets()
+	}
+	qualityPresetHTTP, err := netproxy.NewHTTPClient(90*time.Second, "")
+	if err != nil {
+		log.Printf("[quality-presets] http client: %v; using the default client", err)
+		qualityPresetHTTP = &http.Client{Timeout: 90 * time.Second}
+	}
+	qualityPresetService := qualityprofiles.NewService(qualityPresetStore, qualityprofiles.NewFetcher(qualityPresetStore, qualityPresetHTTP), func() []qualityprofiles.Source {
+		current, err := cfgManager.Load()
+		if err != nil {
+			return qualityprofiles.DefaultSources()
+		}
+		return handlers.SourcesFromConfig(current.QualityPresets.Sources)
+	})
+	qualityPresetService.SetOnChange(func(string) { indexerService.ClearSearchCache() })
+	indexerService.SetQualityPresetProvider(qualityPresetService)
+
 	var historyService *history.Service
 	if store != nil {
 		historyService, err = history.NewServiceWithStore(store)
@@ -839,6 +862,12 @@ func main() {
 	displayListHandler.SetPrequeueStore(prequeueHandler.GetStore())
 	historyHandler.SetPrequeueStore(prequeueHandler.GetStore())
 	startupHandler.SetPrequeueStore(prequeueHandler.GetStore())
+	// A preset that changed (edited, or synced from upstream) ranks releases
+	// differently: drop resolved prequeues as well as cached searches.
+	qualityPresetService.SetOnChange(func(string) {
+		indexerService.ClearSearchCache()
+		prequeueHandler.GetStore().DeleteAll()
+	})
 	log.Printf("[startup] phase=prequeue-handler-wiring duration=%s", time.Since(startupPhaseStarted))
 
 	if settings.Transmux.FFmpegPath == "" {
@@ -958,6 +987,8 @@ func main() {
 		prequeueHandler.SetFullProber(videoHandler) // Combined prober for single ffprobe call
 		prequeueHandler.SetUserSettingsService(userSettingsService)
 		prequeueHandler.SetContentPreferencesService(contentPreferencesService)
+		indexerService.SetTitlePresetProvider(qualityPresetService) // preset memory per title and device
+		prequeueHandler.SetTitlePresetMemory(qualityPresetService)
 		prequeueHandler.SetClientSettingsService(clientSettingsService)
 		prequeueHandler.SetConfigManager(cfgManager)
 		prequeueHandler.SetMetadataService(metadataService)      // For episode counting in pack size filtering
@@ -1050,6 +1081,12 @@ func main() {
 	settingsHandler.SetUserSettingsService(userSettingsService)   // Enable stripping redundant overrides
 	settingsHandler.SetClientsLister(clientsService)              // Enable client→profile mapping
 	settingsHandler.SetClientSettingsBatch(clientSettingsService) // Enable client settings stripping
+	// The hourly update check exists only once presets do (an import adds it).
+	if qualityPresetService.InUse(context.Background()) && handlers.EnsureQualityPresetSyncTask(&settings) {
+		if err := cfgManager.Save(settings); err != nil {
+			log.Printf("[main] failed to persist the quality preset sync task: %v", err)
+		}
+	}
 	if settingsHandler.EnsureEPGTaskForGuide(&settings, "startup") {
 		if err := cfgManager.Save(settings); err != nil {
 			log.Printf("[main] failed to persist startup EPG refresh task backfill: %v", err)
@@ -1160,6 +1197,37 @@ func main() {
 	profileUnlockService := profileunlock.NewService(profileUnlockStore)
 	profileUnlockService.StartCleanup(context.Background(), time.Hour)
 
+	selectPreset := func(mediaType, userID, clientID, titleID string, anime bool) (string, string) {
+		current, err := cfgManager.Load()
+		if err != nil {
+			return "", "none"
+		}
+		sel := indexerService.SelectQualityPreset(indexer.SearchOptions{MediaType: mediaType, UserID: userID, ClientID: clientID, TitleID: titleID, IsAnime: anime}, current)
+		return sel.PresetID, sel.Source
+	}
+	// A title's default preset is the selection without its remembered one.
+	prequeueHandler.SetDefaultQualityPreset(func(ctx context.Context, mediaType, userID, clientID, titleID, name string, year int, imdbID string) string {
+		anime, _ := indexerHandler.TitleAnime(ctx, mediaType, titleID, name, year, imdbID)
+		id, _ := selectPreset(mediaType, userID, clientID, "", anime)
+		return id
+	})
+	qualityPresetsHandler := &handlers.QualityPresetsHandler{
+		Service:        qualityPresetService,
+		Config:         cfgManager,
+		UserSettings:   userSettingsService,
+		ClientSettings: clientSettingsService,
+		Devices:        clientsService,
+		ProfileOwner: func(profileID string) string {
+			if u, ok := userService.Get(profileID); ok {
+				return u.AccountID
+			}
+			return ""
+		},
+		SearchCache:   indexerService,
+		PrequeueStore: prequeueHandler.GetStore(),
+		TitleAnime:    indexerHandler.TitleAnime,
+		Select:        selectPreset,
+	}
 	api.Register(
 		r,
 		settingsHandler,
@@ -1204,6 +1272,7 @@ func main() {
 		settings.Server.HomepageAPIKey,
 		latencyAdmin,
 		api.WithProfileUnlocks(profileUnlockService, api.CachedSecuritySettings(cfgManager, 3*time.Second)),
+		api.WithQualityPresets(qualityPresetsHandler),
 	)
 	log.Printf("[startup] phase=primary-api-routes duration=%s", time.Since(startupPhaseStarted))
 	startupPhaseStarted = time.Now()
@@ -1233,6 +1302,7 @@ func main() {
 	if store != nil {
 		schedulerService.SetHistorySyncSnapshotStore(store.HistorySyncSnapshots())
 	}
+	schedulerService.SetQualityPresetSyncer(qualityPresetService)
 	scheduledTasksHandler := handlers.NewScheduledTasksHandler(cfgManager, schedulerService, userService)
 
 	// Rate limiter for admin/account login (5/min per IP)
@@ -1292,6 +1362,7 @@ func main() {
 	r.HandleFunc("/admin/", adminUIHandler.RequireAuth(adminUIHandler.StatusPage)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/onboarding", adminUIHandler.RequireAuth(adminUIHandler.OnboardingPage)).Methods(http.MethodGet)
 	adminUIHandler.RegisterSportsUI(r, sportsHandler)
+	adminUIHandler.RegisterQualityPresets(r, qualityPresetsHandler)
 	r.HandleFunc("/admin/settings", adminUIHandler.RequireAuth(adminUIHandler.SettingsPage)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/status", adminUIHandler.RequireAuth(adminUIHandler.StatusPage)).Methods(http.MethodGet)
 	r.HandleFunc("/admin/history", adminUIHandler.RequireAuth(adminUIHandler.HistoryPage)).Methods(http.MethodGet)
@@ -2004,6 +2075,9 @@ func main() {
 			StopRequested:     handlers.GetStreamTracker().ShouldStopPlayback,
 			RankingGeneration: prequeueHandler.GetStore().Generation,
 			RecordingFrame:    bridgeRecordingFrame(recordingsService),
+			QualityPresetsInUse: func() bool {
+				return qualityPresetService.InUse(context.Background())
+			},
 			ThumbnailFrames: func(streamPath string) ([]jellyfinbridge.ThumbnailFrame, bool) {
 				frames, done := videoHandler.ThumbnailFrames(streamPath)
 				out := make([]jellyfinbridge.ThumbnailFrame, len(frames))
@@ -2089,6 +2163,7 @@ func main() {
 				RecordingRuleUpdate: bridgeRecordings(recordingsService, recordingsHandler.UpdateRule),
 				RecordingSettings:   bridgeRecordings(recordingsService, recordingsHandler.GetSettings),
 				RecordingStream:     bridgeRecordings(recordingsService, recordingsHandler.Stream),
+				QualityPresets:    qualityPresetsHandler.ClientList,
 			},
 		}, func() (config.JellyfinBridgeSettings, error) {
 			return jellyfinbridge.EnsureServerID(cfgManager, settings.Cache.Directory)
