@@ -885,6 +885,14 @@ func main() {
 	if store != nil {
 		recordingsService = recordings.NewService(store.Recordings(), settings.Transmux.FFmpegPath, filepath.Join(settings.Cache.Directory, "recordings"))
 		recordingsService.SetRuleRepository(store.RecordingRules())
+		recordingsService.SetComskip(func() recordings.ComskipConfig {
+			current, err := cfgManager.Load()
+			if err != nil {
+				return recordings.ComskipConfig{}
+			}
+			c := current.Live.Comskip
+			return recordings.ComskipConfig{Enabled: c.Enabled, Path: c.Path, IniPath: c.IniPath}
+		})
 	}
 	var recordingsStreamProvider streaming.Provider
 	if recordingsService != nil {
@@ -2078,6 +2086,7 @@ func main() {
 			QualityPresetsInUse: func() bool {
 				return qualityPresetService.InUse(context.Background())
 			},
+			RecordingCommercials: bridgeRecordingCommercials(recordingsService),
 			ThumbnailFrames: func(streamPath string) ([]jellyfinbridge.ThumbnailFrame, bool) {
 				frames, done := videoHandler.ThumbnailFrames(streamPath)
 				out := make([]jellyfinbridge.ThumbnailFrame, len(frames))
@@ -2663,6 +2672,15 @@ func bridgeWatchRooms(service *watchrooms.Service) jellyfinbridge.WatchRoomServi
 		return nil
 	}
 	return service
+}
+
+// bridgeRecordingCommercials gives the Jellyfin bridge comskip's commercial
+// breaks when recording is available.
+func bridgeRecordingCommercials(service *recordings.Service) func(string) []models.CommercialBreak {
+	if service == nil {
+		return nil
+	}
+	return service.Commercials
 }
 
 // bridgeRecordingFrame gives the Jellyfin bridge stills from recordings when

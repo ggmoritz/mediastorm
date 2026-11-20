@@ -232,6 +232,13 @@ func (s *Server) mediaSegments(ctx context.Context, p *principal, sess *playSess
 	if done {
 		return cached
 	}
+	if sess.Ref.Kind == refRecording {
+		segments := s.recordingSegments(ctx, p, sess)
+		sess.mu.Lock()
+		sess.segments, sess.segmentsDone = segments, true
+		sess.mu.Unlock()
+		return segments
+	}
 	if s.deps.Handlers.SkipSegments == nil {
 		return []dto.MediaSegmentDto{}
 	}

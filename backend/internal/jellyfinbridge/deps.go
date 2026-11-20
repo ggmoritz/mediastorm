@@ -165,6 +165,9 @@ type Deps struct {
 	// QualityPresetsInUse reports whether any quality preset exists; without
 	// one items skip the preset lookup and keep the plain Auto version.
 	QualityPresetsInUse func() bool
+	// RecordingCommercials returns the commercial breaks comskip found in a
+	// recording file (nil: none known, or comskip is off).
+	RecordingCommercials func(outputPath string) []models.CommercialBreak
 }
 
 // StreamPlan is the output plan of a mediastorm HLS session, as shown in the
