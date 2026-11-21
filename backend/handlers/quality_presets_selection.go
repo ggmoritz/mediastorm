@@ -206,7 +206,12 @@ func (h *QualityPresetsHandler) ClientList(w http.ResponseWriter, r *http.Reques
 		// The title's remembered preset applies to the title's own media type.
 		titleID := ""
 		if withTitle && mediaType == titleMedia {
-			titleID = strings.TrimSpace(q.Get("titleId"))
+			// Remembered under the prequeue's canonical ID, whichever form
+			// of the title's ID the app has.
+			if raw := strings.TrimSpace(q.Get("titleId")); raw != "" {
+				titleID = canonicalPrequeueTitleID(mediaType, raw, strings.TrimSpace(q.Get("imdbId")),
+					strings.TrimSpace(q.Get("tmdbId")), strings.TrimSpace(q.Get("tvdbId")))
+			}
 		}
 		id, source := h.Select(mediaType, userID, clientID, titleID, titleAnime)
 		// A missing preset, one for the other app or one for another

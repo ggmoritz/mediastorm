@@ -775,3 +775,22 @@ func TestQualityPresetSyncTaskAddedOnImport(t *testing.T) {
 		t.Errorf("tasks = %d, want 1", count())
 	}
 }
+
+// The app list looks a title's remembered preset up under the prequeue's
+// canonical ID, whichever form of the ID the app sends.
+func TestClientListUsesCanonicalTitleID(t *testing.T) {
+	h, _ := newPresetHandler(t)
+	var titles []string
+	h.Select = func(mediaType, userID, clientID, titleID string, _ bool) (string, string) {
+		titles = append(titles, mediaType+"="+titleID)
+		return "", "none"
+	}
+	rec := httptest.NewRecorder()
+	h.ClientList(rec, presetRequest(http.MethodGet, "/x?mediaType=series&titleId=tvdb:series:336522&tmdbId=74577&name=Show", "", false, "acc", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if strings.Join(titles, ",") != "movie=,series=tmdb:tv:74577,movie=,series=" {
+		t.Fatalf("selections asked for %q", titles)
+	}
+}
